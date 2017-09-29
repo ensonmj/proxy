@@ -11,7 +11,7 @@ import (
 
 func init() {
 	log = logrus.New()
-	tlsNextProto = make(map[string]func(*tls.Conn))
+	tlsNextProto = make(map[string]func(*tls.Conn, func(context.Context, string, string) (net.Conn, error)))
 }
 
 const (

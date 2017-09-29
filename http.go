@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"io"
 	"io/ioutil"
 	"net"
@@ -18,6 +17,11 @@ type HttpHandler struct {
 }
 
 func NewHttpHandler(dialCtx func(context.Context, string, string) (net.Conn, error)) *HttpHandler {
+	if dialCtx == nil {
+		dialCtx = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return net.Dial(network, addr)
+		}
+	}
 	return &HttpHandler{
 		hasPort: regexp.MustCompile(`:\d+$`),
 		dialCtx: dialCtx,
@@ -35,19 +39,12 @@ func (h *HttpHandler) ServeConn(rwc io.ReadWriteCloser) {
 		}
 		// buf, _ := dumpRequest(req, false)
 		// fmt.Println(string(buf))
-		tr := &http.Transport{
-			TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
-			MaxIdleConnsPerHost: 1000,
-			DisableKeepAlives:   true,
-			DialContext:         h.dialCtx,
-		}
-
 		if req.Method == "CONNECT" {
 			host := req.URL.Host
 			if !h.hasPort.MatchString(host) {
 				host += ":80"
 			}
-			targetSiteCon, err := tr.Dial("tcp", host)
+			targetSiteCon, err := h.dialCtx(req.Context(), "tcp", host)
 			if err != nil {
 				httpResp(rwc, req, 500, err.Error())
 				return
@@ -67,6 +64,10 @@ func (h *HttpHandler) ServeConn(rwc io.ReadWriteCloser) {
 		}
 
 		removeProxyHeaders(req)
+
+		tr := &http.Transport{
+			DialContext: h.dialCtx,
+		}
 		resp, _ := tr.RoundTrip(req)
 		resp.Write(rwc)
 	}
