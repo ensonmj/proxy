@@ -11,6 +11,7 @@ import (
 
 func init() {
 	log = logrus.New()
+	// log.SetLevel(logrus.DebugLevel)
 	tlsNextProto = make(map[string]func(*tls.Conn, func(context.Context, string, string) (net.Conn, error)))
 }
 
@@ -27,6 +28,17 @@ type Handler interface {
 	ServeConn(io.ReadWriteCloser)
 }
 
+// ****************************************************************************
+//                      ________________________________
+//                     |                                |
+// client --tcp/udp--> |proxy ... --tcp/udp--> ... proxy| --tcp/udp--> server
+//                     |________________________________|
+//
+//                             |------obfs----->|
+//
+//   |--------------------------------tls------------------------------->|
+//
+// ****************************************************************************
 type Server struct {
 	DialCtx func(ctx context.Context, network, addr string) (net.Conn, error)
 }
@@ -51,7 +63,6 @@ func (s *Server) Serve(l net.Listener) error {
 
 func handleConn(conn net.Conn,
 	dialCtx func(context.Context, string, string) (net.Conn, error)) {
-	defer conn.Close()
 	if tlsConn, ok := conn.(*tls.Conn); ok {
 		if err := tlsConn.Handshake(); err != nil {
 			log.WithError(err).Error("[proxy] tls handshake failed")

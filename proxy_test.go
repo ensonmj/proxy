@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"io"
 	"io/ioutil"
 	"net"
@@ -12,38 +13,7 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-func doTestProxy(t *testing.T, tr *http.Transport) {
-	t.Helper()
-
-	// http server
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "success")
-	}))
-	defer srv.Close()
-
-	// http client with proxy
-	client := &http.Client{Transport: tr}
-
-	// do http request with proxy
-	resp, err := client.Get(srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	txt, err := ioutil.ReadAll(resp.Body)
-	defer resp.Body.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("got %d:%s\n", resp.StatusCode, txt)
-	}
-	if string(txt) != "success" {
-		t.Fatalf("expect success, but got %s\n", txt)
-	}
-	t.Log("proxy test success")
-}
-
-func setupProxyServer(t *testing.T) net.Listener {
+func setupProxyServer(t *testing.T, dialCtx func(context.Context, string, string) (net.Conn, error)) net.Listener {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -55,34 +25,91 @@ func setupProxyServer(t *testing.T) net.Listener {
 		if err != nil {
 			t.Fatal(err)
 		}
-		handleConn(conn, nil)
+		handleConn(conn, dialCtx)
 	}()
 
 	t.Logf("proxy server listen at:%s", ln.Addr().String())
 	return ln
 }
 
-func getProxyTransport(t *testing.T, scheme string, addr string) *http.Transport {
+func setupHttpServer(t *testing.T, useTLS bool) *httptest.Server {
+	if useTLS {
+		return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "success")
+		}))
+	}
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "success")
+	}))
+}
+
+func setupHttpClient(t *testing.T, ts *httptest.Server, scheme string, addr string) *http.Client {
 	t.Helper()
 
 	proxyAddr := scheme + "://" + addr
+	t.Logf("use proxy:%s", proxyAddr)
+
 	proxyURL, err := url.Parse(proxyAddr)
-	t.Logf("proxy scheme:%s", scheme)
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	tc := ts.Client()
+
 	switch scheme {
 	case "http":
-		return &http.Transport{Proxy: http.ProxyURL(proxyURL)}
-	case "socks5":
-		dialer, err := proxy.FromURL(proxyURL, proxy.Direct)
-		if err != nil {
-			t.Error(err)
+		if tr, ok := tc.Transport.(*http.Transport); ok {
+			// tr.DisableKeepAlives = true
+			// tr.TLSClientConfig.CipherSuites = []uint16{tls.TLS_RSA_WITH_RC4_128_SHA}
+			tr.Proxy = http.ProxyURL(proxyURL)
+			return tc
 		}
-		return &http.Transport{Dial: dialer.Dial}
+		t.Fatal("failed to type assert http.Transport")
+	case "socks5":
+		if tr, ok := tc.Transport.(*http.Transport); ok {
+			dialer, err := proxy.FromURL(proxyURL, proxy.Direct)
+			if err != nil {
+				t.Error(err)
+			}
+
+			// tr.DisableKeepAlives = true
+			// tr.TLSClientConfig.CipherSuites = []uint16{tls.TLS_RSA_WITH_RC4_128_SHA}
+			tr.Dial = dialer.Dial
+
+			return tc
+		}
+		t.Fatal("failed to type assert http.Transport")
 	default:
 		t.Fatalf("unknown scheme[%s]", scheme)
-		return nil
 	}
+
+	return nil
+}
+
+func doTestProxy(t *testing.T, ts *httptest.Server, tc *http.Client) {
+	t.Helper()
+
+	defer ts.Close()
+
+	// do http request with proxy
+	resp, err := tc.Get(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	txt, err := ioutil.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("got %d:%s\n", resp.StatusCode, txt)
+	}
+	if string(txt) != "success" {
+		t.Fatalf("expect success, but got %s\n", txt)
+	}
+
+	t.Log("proxy test success")
 }

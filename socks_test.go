@@ -5,12 +5,14 @@ import (
 )
 
 func TestSocks5Server(t *testing.T) {
-	// socks5 proxy server
-	ln := setupProxyServer(t)
+	ln := setupProxyServer(t, nil)
 	defer ln.Close()
 
+	ts := setupHttpServer(t, false)
+	tc := setupHttpClient(t, ts, "socks5", ln.Addr().String())
+
 	// test action
-	doTestProxy(t, getProxyTransport(t, "socks5", ln.Addr().String()))
+	doTestProxy(t, ts, tc)
 }
 
 // func TestSocks5Auth(t *testing.T) {

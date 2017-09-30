@@ -29,34 +29,35 @@ func NewHttpHandler(dialCtx func(context.Context, string, string) (net.Conn, err
 }
 
 func (h *HttpHandler) ServeConn(rwc io.ReadWriteCloser) {
-	for {
-		req, err := http.ReadRequest(bufio.NewReader(rwc))
+	req, err := http.ReadRequest(bufio.NewReader(rwc))
+	if err != nil {
+		if err != io.EOF {
+			log.WithError(err).Error("[http] read http request")
+		}
+		return
+	}
+	// buf, _ := dumpRequest(req, false)
+	// fmt.Println(string(buf))
+	if req.Method == "CONNECT" {
+		host := req.URL.Host
+		if !h.hasPort.MatchString(host) {
+			host += ":80"
+		}
+		targetSiteCon, err := h.dialCtx(req.Context(), "tcp", host)
 		if err != nil {
-			if err != io.EOF {
-				log.WithError(err).Error("[http] read http request")
-			}
+			httpResp(rwc, req, 500, err.Error())
 			return
 		}
-		// buf, _ := dumpRequest(req, false)
-		// fmt.Println(string(buf))
-		if req.Method == "CONNECT" {
-			host := req.URL.Host
-			if !h.hasPort.MatchString(host) {
-				host += ":80"
-			}
-			targetSiteCon, err := h.dialCtx(req.Context(), "tcp", host)
-			if err != nil {
-				httpResp(rwc, req, 500, err.Error())
-				return
-			}
-			httpResp(rwc, req, 200, "")
+		httpResp(rwc, req, 200, "")
+		log.WithField("host", host).Debug("[http] success dial server")
 
-			go copyAndClose(targetSiteCon, rwc)
-			go copyAndClose(rwc, targetSiteCon)
+		go copyAndClose(targetSiteCon, rwc)
+		go copyAndClose(rwc, targetSiteCon)
 
-			return
-		}
+		return
+	}
 
+	for {
 		if !req.URL.IsAbs() {
 			httpResp(rwc, req, 500,
 				"This is a proxy server. Does not respond to non-proxy requests.")
@@ -70,7 +71,17 @@ func (h *HttpHandler) ServeConn(rwc io.ReadWriteCloser) {
 		}
 		resp, _ := tr.RoundTrip(req)
 		resp.Write(rwc)
+
+		req, err = http.ReadRequest(bufio.NewReader(rwc))
+		if err != nil {
+			if err != io.EOF {
+				log.WithError(err).Error("[http] read http request")
+			}
+			return
+		}
 	}
+
+	rwc.Close()
 }
 
 func httpResp(w io.Writer, req *http.Request, code int, body string) {
