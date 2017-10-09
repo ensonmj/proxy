@@ -28,18 +28,20 @@ func setupProxyServer(t *testing.T, dialCtx func(context.Context, string, string
 		handleConn(conn, dialCtx)
 	}()
 
-	t.Logf("proxy server listen at: %s", ln.Addr().String())
+	t.Logf("proxy server listen at %s", ln.Addr().String())
 	return ln
 }
 
 func setupHttpServer(t *testing.T, useTLS bool) *httptest.Server {
 	if useTLS {
 		return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Logf("get http request from %s", r.RemoteAddr)
 			io.WriteString(w, "success")
 		}))
 	}
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("get http request from %s", r.RemoteAddr)
 		io.WriteString(w, "success")
 	}))
 }
@@ -48,7 +50,7 @@ func setupHttpClient(t *testing.T, ts *httptest.Server, scheme string, addr stri
 	t.Helper()
 
 	proxyAddr := scheme + "://" + addr
-	t.Logf("use proxy: %s", proxyAddr)
+	t.Logf("use proxy[%s] to connect http server[%s]", proxyAddr, ts.Listener.Addr().String())
 
 	proxyURL, err := url.Parse(proxyAddr)
 	if err != nil {
@@ -60,8 +62,6 @@ func setupHttpClient(t *testing.T, ts *httptest.Server, scheme string, addr stri
 	switch scheme {
 	case "http":
 		if tr, ok := tc.Transport.(*http.Transport); ok {
-			// tr.DisableKeepAlives = true
-			// tr.TLSClientConfig.CipherSuites = []uint16{tls.TLS_RSA_WITH_RC4_128_SHA}
 			tr.Proxy = http.ProxyURL(proxyURL)
 			return tc
 		}
@@ -73,8 +73,6 @@ func setupHttpClient(t *testing.T, ts *httptest.Server, scheme string, addr stri
 				t.Error(err)
 			}
 
-			// tr.DisableKeepAlives = true
-			// tr.TLSClientConfig.CipherSuites = []uint16{tls.TLS_RSA_WITH_RC4_128_SHA}
 			tr.Dial = dialer.Dial
 
 			return tc
