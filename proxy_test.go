@@ -28,7 +28,7 @@ func setupProxyServer(t *testing.T, dialCtx func(context.Context, string, string
 		handleConn(conn, dialCtx)
 	}()
 
-	t.Logf("proxy server listen at:%s", ln.Addr().String())
+	t.Logf("proxy server listen at: %s", ln.Addr().String())
 	return ln
 }
 
@@ -48,7 +48,7 @@ func setupHttpClient(t *testing.T, ts *httptest.Server, scheme string, addr stri
 	t.Helper()
 
 	proxyAddr := scheme + "://" + addr
-	t.Logf("use proxy:%s", proxyAddr)
+	t.Logf("use proxy: %s", proxyAddr)
 
 	proxyURL, err := url.Parse(proxyAddr)
 	if err != nil {

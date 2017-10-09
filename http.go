@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"sync"
 )
 
 type HttpHandler struct {
@@ -29,7 +30,10 @@ func NewHttpHandler(dialCtx func(context.Context, string, string) (net.Conn, err
 }
 
 func (h *HttpHandler) ServeConn(rwc io.ReadWriteCloser) {
-	req, err := http.ReadRequest(bufio.NewReader(rwc))
+	defer rwc.Close()
+
+	bufReader := bufio.NewReader(rwc)
+	req, err := http.ReadRequest(bufReader)
 	if err != nil {
 		if err != io.EOF {
 			log.WithError(err).Error("[http] read http request")
@@ -38,21 +42,22 @@ func (h *HttpHandler) ServeConn(rwc io.ReadWriteCloser) {
 	}
 	// buf, _ := dumpRequest(req, false)
 	// fmt.Println(string(buf))
+
 	if req.Method == "CONNECT" {
 		host := req.URL.Host
 		if !h.hasPort.MatchString(host) {
 			host += ":80"
 		}
-		targetSiteCon, err := h.dialCtx(req.Context(), "tcp", host)
+		targetConn, err := h.dialCtx(req.Context(), "tcp", host)
 		if err != nil {
 			httpResp(rwc, req, 500, err.Error())
 			return
 		}
+		defer targetConn.Close()
 		httpResp(rwc, req, 200, "")
 		log.WithField("host", host).Debug("[http] success dial server")
 
-		go copyAndClose(targetSiteCon, rwc)
-		go copyAndClose(rwc, targetSiteCon)
+		connIO(targetConn, rwc)
 
 		return
 	}
@@ -72,7 +77,7 @@ func (h *HttpHandler) ServeConn(rwc io.ReadWriteCloser) {
 		resp, _ := tr.RoundTrip(req)
 		resp.Write(rwc)
 
-		req, err = http.ReadRequest(bufio.NewReader(rwc))
+		req, err = http.ReadRequest(bufReader)
 		if err != nil {
 			if err != io.EOF {
 				log.WithError(err).Error("[http] read http request")
@@ -80,8 +85,6 @@ func (h *HttpHandler) ServeConn(rwc io.ReadWriteCloser) {
 			return
 		}
 	}
-
-	rwc.Close()
 }
 
 func httpResp(w io.Writer, req *http.Request, code int, body string) {
@@ -127,11 +130,20 @@ func removeProxyHeaders(req *http.Request) {
 	req.Header.Del("Connection")
 }
 
-func copyAndClose(dst io.WriteCloser, src io.ReadCloser) {
-	if _, err := io.Copy(dst, src); err != nil {
-		log.WithError(err).Error("[http] copy content")
+func connIO(dst, src io.ReadWriter) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go copyData(dst, src, &wg)
+	go copyData(src, dst, &wg)
+
+	wg.Wait()
+}
+
+func copyData(dst io.Writer, src io.Reader, wg *sync.WaitGroup) {
+	if _, err := io.Copy(dst, src); err != nil && err != io.EOF {
+		log.WithError(err).Error("[http] copy connection content")
 	}
 
-	dst.Close()
-	src.Close()
+	wg.Done()
 }
