@@ -15,6 +15,7 @@ import (
 type HttpHandler struct {
 	hasPort *regexp.Regexp
 	dialCtx func(ctx context.Context, network, addr string) (net.Conn, error)
+	client  http.Client
 }
 
 func NewHttpHandler(dialCtx func(context.Context, string, string) (net.Conn, error)) *HttpHandler {
@@ -26,6 +27,11 @@ func NewHttpHandler(dialCtx func(context.Context, string, string) (net.Conn, err
 	return &HttpHandler{
 		hasPort: regexp.MustCompile(`:\d+$`),
 		dialCtx: dialCtx,
+		client: http.Client{
+			Transport: &http.Transport{
+				DialContext: dialCtx,
+			},
+		},
 	}
 }
 
@@ -71,10 +77,11 @@ func (h *HttpHandler) ServeConn(rwc io.ReadWriteCloser) {
 
 		removeProxyHeaders(req)
 
-		tr := &http.Transport{
-			DialContext: h.dialCtx,
+		resp, err := h.client.Do(req)
+		if err != nil {
+			httpResp(rwc, req, 500, err.Error())
+			return
 		}
-		resp, _ := tr.RoundTrip(req)
 		resp.Write(rwc)
 
 		req, err = http.ReadRequest(bufReader)
