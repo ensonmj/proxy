@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"crypto/tls"
 	"io"
 	"net"
 
@@ -13,7 +12,6 @@ import (
 func init() {
 	log = logrus.New()
 	// log.SetLevel(logrus.DebugLevel)
-	tlsNextProto = make(map[string]func(*tls.Conn, func(context.Context, string, string) (net.Conn, error)))
 }
 
 const (
@@ -21,8 +19,7 @@ const (
 )
 
 var (
-	log          *logrus.Logger
-	tlsNextProto map[string]func(*tls.Conn, func(context.Context, string, string) (net.Conn, error))
+	log *logrus.Logger
 )
 
 type Handler interface {
@@ -53,7 +50,7 @@ func NewServer(n Node,
 
 func (s *Server) Listen() error {
 	// now only support tcp
-	ln, err := net.Listen("tcp", n.URL.Host)
+	ln, err := net.Listen("tcp", s.Node.URL.Host)
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -68,26 +65,12 @@ func (s *Server) Serve(ln net.Listener) error {
 			return err
 		}
 
-		go handleConn(conn, s.DialCtx)
+		go handleConn(&s.Node, conn, s.DialCtx)
 	}
 }
 
-func handleConn(conn net.Conn,
+func handleConn(node *Node, conn net.Conn,
 	dialCtx func(context.Context, string, string) (net.Conn, error)) {
-	if tlsConn, ok := conn.(*tls.Conn); ok {
-		if err := tlsConn.Handshake(); err != nil {
-			log.WithError(err).Error("[proxy] tls handshake failed")
-			return
-		}
-
-		if proto := tlsConn.ConnectionState().NegotiatedProtocol; validNPN(proto) {
-			if fn := tlsNextProto[proto]; fn != nil {
-				fn(tlsConn, dialCtx)
-			}
-			return
-		}
-	}
-
 	// http or socks5
 	b := make([]byte, 1024)
 	n, err := io.ReadAtLeast(conn, b, 2)
@@ -99,21 +82,13 @@ func handleConn(conn net.Conn,
 	var h Handler
 	if b[0] == socks5Version {
 		// socks5
-		h = &SocksHandler{dialCtx: dialCtx}
+		h = NewSocksHandler(node, dialCtx)
 	} else {
 		// HTTP/1.x
-		h = NewHttpHandler(dialCtx)
+		h = NewHttpHandler(node, dialCtx)
 	}
 
 	h.ServeConn(&connRWC{Conn: conn, b: b[:n]})
-}
-
-func validNPN(proto string) bool {
-	switch proto {
-	case "", "http/1.1", "http/1.0":
-		return false
-	}
-	return true
 }
 
 type connRWC struct {

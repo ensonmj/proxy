@@ -4,27 +4,38 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strings"
 	"sync"
+
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 type HttpHandler struct {
+	node    *Node
 	hasPort *regexp.Regexp
 	dialCtx func(ctx context.Context, network, addr string) (net.Conn, error)
 	client  http.Client
 }
 
-func NewHttpHandler(dialCtx func(context.Context, string, string) (net.Conn, error)) *HttpHandler {
+func NewHttpHandler(
+	n *Node,
+	dialCtx func(context.Context, string, string) (net.Conn, error)) *HttpHandler {
 	if dialCtx == nil {
 		dialCtx = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return net.Dial(network, addr)
 		}
 	}
 	return &HttpHandler{
+		node:    n,
 		hasPort: regexp.MustCompile(`:\d+$`),
 		dialCtx: dialCtx,
 		client: http.Client{
@@ -48,6 +59,40 @@ func (h *HttpHandler) ServeConn(rwc io.ReadWriteCloser) {
 	}
 	// buf, _ := dumpRequest(req, false)
 	// fmt.Println(string(buf))
+
+	// need auth
+	if h.node != nil && h.node.URL.User != nil {
+		log.WithField("node", h.node).Debug("[http] need auth")
+		reqUser, reqPass, ok := getBasicAuth(req)
+		if !ok {
+			log.WithFields(logrus.Fields{
+				"username": reqUser,
+				"password": reqPass,
+				"ok":       ok,
+			}).Warn("[http] auth failed")
+			return
+		}
+
+		srvUser := h.node.URL.User.Username()
+		if reqUser != srvUser {
+			log.WithFields(logrus.Fields{
+				"username": reqUser,
+				"password": reqPass,
+				"ok":       ok,
+			}).Warn("[http] auth failed")
+			return
+		}
+
+		srvPass, needPass := h.node.URL.User.Password()
+		if needPass && reqPass != srvPass {
+			log.WithFields(logrus.Fields{
+				"username": reqUser,
+				"password": reqPass,
+				"ok":       ok,
+			}).Warn("[http] auth failed")
+			return
+		}
+	}
 
 	if req.Method == "CONNECT" {
 		host := req.URL.Host
@@ -92,6 +137,27 @@ func (h *HttpHandler) ServeConn(rwc io.ReadWriteCloser) {
 			return
 		}
 	}
+}
+
+func getBasicAuth(req *http.Request) (username, password string, ok bool) {
+	auth := req.Header.Get("Proxy-Authorization")
+	if auth == "" {
+		return
+	}
+	const prefix = "Basic "
+	if !strings.HasPrefix(auth, prefix) {
+		return
+	}
+	c, err := base64.StdEncoding.DecodeString(auth[len(prefix):])
+	if err != nil {
+		return
+	}
+	cs := string(c)
+	s := strings.IndexByte(cs, ':')
+	if s < 0 {
+		return
+	}
+	return cs[:s], cs[s+1:], true
 }
 
 func httpResp(w io.Writer, req *http.Request, code int, body string) {

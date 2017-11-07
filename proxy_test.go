@@ -2,18 +2,43 @@ package proxy
 
 import (
 	"context"
+	"flag"
 	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"testing"
+
+	"github.com/sirupsen/logrus"
 
 	"golang.org/x/net/proxy"
 )
 
-func setupProxyServer(t *testing.T, dialCtx func(context.Context, string, string) (net.Conn, error)) net.Listener {
+func TestMain(m *testing.M) {
+	setup()
+	ret := m.Run()
+	teardown()
+	os.Exit(ret)
+}
+
+func setup() {
+	flag.Parse()
+	if testing.Verbose() {
+		log.SetLevel(logrus.DebugLevel)
+	} else {
+		log.SetLevel(logrus.PanicLevel)
+		log.Out = ioutil.Discard
+	}
+}
+
+func teardown() {}
+
+func setupProxyServer(t *testing.T,
+	n *Node,
+	dialCtx func(context.Context, string, string) (net.Conn, error)) net.Listener {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -25,7 +50,7 @@ func setupProxyServer(t *testing.T, dialCtx func(context.Context, string, string
 		if err != nil {
 			t.Fatal(err)
 		}
-		handleConn(conn, dialCtx)
+		handleConn(n, conn, dialCtx)
 	}()
 
 	t.Logf("proxy server listen at %s", ln.Addr().String())
@@ -85,13 +110,26 @@ func setupHttpClient(t *testing.T, ts *httptest.Server, scheme string, addr stri
 	return nil
 }
 
-func doTestProxy(t *testing.T, ts *httptest.Server, tc *http.Client) {
+func doTestProxy(t *testing.T, ts *httptest.Server, tc *http.Client, n *Node) {
 	t.Helper()
 
 	defer ts.Close()
 
 	// do http request with proxy
-	resp, err := tc.Get(ts.URL)
+	req, err := http.NewRequest("GET", ts.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != nil && n.URL.User != nil {
+		user := n.URL.User.Username()
+		pass, _ := n.URL.User.Password()
+		t.Logf("http request with username:%s, password:%s", user, pass)
+		req.Header.Set("Proxy-Authorization", basicAuth(user, pass))
+	}
+	// buf, _ := dumpRequest(req, false)
+	// fmt.Println(string(buf))
+
+	resp, err := tc.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

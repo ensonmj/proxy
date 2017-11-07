@@ -5,15 +5,16 @@ import (
 	"strings"
 
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 type Node struct {
 	URL url.URL
 }
 
-func (n Node) String() string {
-	return n.URL.String()
-}
+// func (n Node) String() string {
+// 	return n.URL.String()
+// }
 
 func (n Node) Addr() string {
 	return n.URL.Scheme + "://" + n.URL.Host
@@ -39,8 +40,13 @@ func ParseNode(rawurl string) (*Node, error) {
 		return nil, errors.Errorf("scheme:%s not support\n", url.Scheme)
 	}
 
-	log.Printf("success to parse node: %s\n", url.String())
-	return &Node{
+	n := &Node{
 		URL: *url,
-	}, nil
+	}
+	log.WithFields(logrus.Fields{
+		"url":  rawurl,
+		"node": n,
+	}).Debug("success to parse node")
+
+	return n, nil
 }
