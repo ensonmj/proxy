@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -34,24 +35,34 @@ type Handler interface {
 // client --tcp/udp--> |proxy ... --tcp/udp--> ... proxy| --tcp/udp--> server
 //                     |________________________________|
 //
-//                             |------obfs----->|
-//
-//   |--------------------------------tls------------------------------->|
+//    |----socks/http----||----------tun------------||-----any proto-----|
 //
 // ****************************************************************************
 type Server struct {
+	Node
 	DialCtx func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-func NewServer(dialCtx func(context.Context, string, string) (net.Conn, error)) *Server {
+func NewServer(n Node,
+	dialCtx func(context.Context, string, string) (net.Conn, error)) *Server {
 	return &Server{
+		Node:    n,
 		DialCtx: dialCtx,
 	}
 }
 
-func (s *Server) Serve(l net.Listener) error {
+func (s *Server) Listen() error {
+	// now only support tcp
+	ln, err := net.Listen("tcp", n.URL.Host)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	return s.Serve(ln)
+}
+
+func (s *Server) Serve(ln net.Listener) error {
 	for {
-		conn, err := l.Accept()
+		conn, err := ln.Accept()
 		if err != nil {
 			log.WithError(err).Error("[proxy] accept connection closed")
 			return err
