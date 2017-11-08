@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
@@ -19,6 +18,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// *********************************** proxy **********************************
 type HttpHandler struct {
 	node    *Node
 	hasPort *regexp.Regexp
@@ -219,4 +219,88 @@ func copyData(dst io.Writer, src io.Reader, wg *sync.WaitGroup) {
 	}
 
 	wg.Done()
+}
+
+// *********************************** chain **********************************
+type HttpChainNode struct {
+	Node
+}
+
+func NewHttpChainNode(n Node) *HttpChainNode {
+	return &HttpChainNode{
+		Node: n,
+	}
+}
+
+func (n *HttpChainNode) URL() *url.URL {
+	return &n.Node.URL
+}
+
+func (n *HttpChainNode) Connect() (net.Conn, error) {
+	conn, err := net.Dial("tcp", n.URL().Host)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	return conn, err
+}
+
+func (n *HttpChainNode) Handshake(c net.Conn) error {
+	// log.Println("handshake with http node")
+	return nil
+}
+
+func (n *HttpChainNode) ForwardRequest(c net.Conn, url *url.URL) (net.Conn, error) {
+	// log.Printf("forward request to hop[%s] by HTTP", url.String())
+	req := &http.Request{
+		Method:     http.MethodConnect,
+		URL:        url,
+		Host:       url.Host,
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     make(http.Header),
+	}
+	req.Header.Set("Proxy-Connection", "keep-alive")
+	if url.User != nil {
+		user := url.User.Username()
+		pass, _ := url.User.Password()
+		req.Header.Set("Proxy-Authorization", basicAuth(user, pass))
+	}
+
+	if err := req.Write(c); err != nil {
+		return nil, errors.Wrap(err, "forward request")
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(c), req)
+	if err != nil {
+		return nil, errors.Wrap(err, "forward request read response")
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return nil, errors.Wrap(err, "forward request clear body")
+		}
+		return nil, errors.New("proxy refused connection" + string(resp))
+	}
+
+	return HttpHookConn{Conn: c}, nil
+}
+
+func basicAuth(username, password string) string {
+	auth := username + ":" + password
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
+}
+
+// *********************************** hook ***********************************
+type HttpHookConn struct {
+	net.Conn
+}
+
+func (c HttpHookConn) Read(b []byte) (n int, err error) {
+	return c.Conn.Read(b)
+}
+
+func (c HttpHookConn) Write(b []byte) (n int, err error) {
+	return c.Conn.Write(b)
+
 }

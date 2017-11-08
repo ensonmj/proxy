@@ -26,29 +26,42 @@ type Handler interface {
 	ServeConn(io.ReadWriteCloser)
 }
 
-// ****************************************************************************
-//                      ________________________________
-//                     |                                |
-// client --tcp/udp--> |proxy ... --tcp/udp--> ... proxy| --tcp/udp--> server
-//                     |________________________________|
+// **********************************************************************************
+//                                ______________________________
+//                               |                              |
+// client --tcp/udp--> proxy --> |chain ...--tcp/udp-->... chain| --tcp/udp--> server
+//                               |______________________________|
 //
-//    |----socks/http----||----------tun------------||-----any proto-----|
+//   |----socks/http----| |----------------tun--------------| |-----any proto-----|
 //
-// ****************************************************************************
+// API:
+//                    (Listen)
+//                        |----------------------DialContext----------------------|
+//
+//                                  |---Handshake/Forward---|
+//
+// **********************************************************************************
 type Server struct {
 	Node
 	DialCtx func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-func NewServer(n Node,
-	dialCtx func(context.Context, string, string) (net.Conn, error)) *Server {
-	return &Server{
-		Node:    n,
-		DialCtx: dialCtx,
+func NewServer(localURL string, chainURL ...string) (*Server, error) {
+	n, err := ParseNode(localURL)
+	if err != nil {
+		return nil, err
 	}
+	chain, err := NewProxyChain(chainURL...)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{
+		Node:    *n,
+		DialCtx: chain.DialContext,
+	}, nil
 }
 
-func (s *Server) Listen() error {
+func (s *Server) ListenAndServe() error {
 	// now only support tcp
 	ln, err := net.Listen("tcp", s.Node.URL.Host)
 	if err != nil {

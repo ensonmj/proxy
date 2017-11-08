@@ -36,6 +36,8 @@ func setup() {
 
 func teardown() {}
 
+// n used for auth
+// dialCtx used for chain
 func setupProxyServer(t *testing.T,
 	n *Node,
 	dialCtx func(context.Context, string, string) (net.Conn, error)) net.Listener {
@@ -55,6 +57,30 @@ func setupProxyServer(t *testing.T,
 
 	t.Logf("proxy server listen at %s", ln.Addr().String())
 	return ln
+}
+
+func setupChainServers(t *testing.T, schemes ...string) (
+	dialCtx func(context.Context, string, string) (net.Conn, error),
+	release func()) {
+	var nodes []string
+	var lns []net.Listener
+	for _, scheme := range schemes {
+		ln := setupProxyServer(t, nil, nil)
+		lns = append(lns, ln)
+		nodes = append(nodes, scheme+"://"+ln.Addr().String())
+	}
+	chain, err := NewProxyChain(nodes...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	release = func() {
+		for _, ln := range lns {
+			ln.Close()
+		}
+	}
+
+	return chain.DialContext, release
 }
 
 func setupHttpServer(t *testing.T, useTLS bool) *httptest.Server {
