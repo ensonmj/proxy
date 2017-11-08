@@ -280,7 +280,7 @@ func (n *HttpChainNode) ForwardRequest(c net.Conn, url *url.URL) (net.Conn, erro
 		if err != nil {
 			return nil, errors.Wrap(err, "forward request clear body")
 		}
-		return nil, errors.New("proxy refused connection" + string(resp))
+		return nil, errors.New("proxy refused connection: " + string(resp))
 	}
 
 	return HttpHookConn{Conn: c}, nil

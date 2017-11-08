@@ -6,20 +6,10 @@ import (
 	"net"
 
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
-
-func init() {
-	log = logrus.New()
-	// log.SetLevel(logrus.DebugLevel)
-}
 
 const (
 	socks5Version = 5
-)
-
-var (
-	log *logrus.Logger
 )
 
 type Handler interface {
