@@ -20,28 +20,56 @@ func TestNewProxyChain(t *testing.T) {
 
 func TestChainProxy(t *testing.T) {
 	data := [][]string{
-		[]string{"http"},
-		[]string{"socks5"},
-		[]string{"http", "http"},
-		[]string{"http", "socks5"},
-		[]string{"socks5", "socks5"},
-		[]string{"socks5", "http"},
-		[]string{"http", "socks5", "http"},
-		[]string{"socks5", "http", "socks5"},
+		[]string{
+			"http://0:0",
+		},
+		[]string{
+			"socks5://0:0",
+		},
+		[]string{
+			"http://0:0",
+			"http://0:0",
+		},
+		[]string{
+			"http://0:0",
+			"socks5://0:0",
+		},
+		[]string{
+			"socks5://0:0",
+			"socks5://0:0",
+		},
+		[]string{
+			"socks5://0:0",
+			"http://0:0",
+		},
+		[]string{
+			"http://0:0",
+			"socks5://0:0",
+			"http://0:0",
+		},
+		[]string{
+			"socks5://0:0",
+			"http://0:0",
+			"socks5://0:0",
+		},
 	}
 
-	for _, schemes := range data {
+	for _, urls := range data {
+		t.Logf("test %#v chain server", urls)
 		// chained proxy server
-		dialCtx, release := setupChainServers(t, schemes...)
+		dialCtx, release := setupChainServers(t, urls...)
+
+		// node for both client and proxy server
+		n := setupNode(t, "ghost://0:0")
 
 		// local proxy server
-		ln := setupProxyServer(t, nil, dialCtx)
+		ln := setupProxyServer(t, n, dialCtx)
 
 		ts := setupHttpServer(t, false)
 		tc := setupHttpClient(t, ts, "http", ln.Addr().String())
 
 		// test action
-		doTestProxy(t, ts, tc, nil)
+		doTestProxy(t, ts, tc, n)
 
 		ln.Close()
 		release()

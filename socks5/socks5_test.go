@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
-	"log"
 	"net"
-	"os"
 	"testing"
 	"time"
 )
@@ -43,16 +41,22 @@ func TestSOCKS5_Connect(t *testing.T) {
 	cator := UserPassAuthenticator{Credentials: creds}
 	conf := &Config{
 		AuthMethods: []Authenticator{cator},
-		Logger:      log.New(os.Stdout, "", log.LstdFlags),
+		// Logger:      log.New(os.Stdout, "", log.LstdFlags),
 	}
-	serv, err := New(conf)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
+	serv := New(conf)
 
 	// Start listening
 	go func() {
-		if err := serv.ListenAndServe("tcp", "127.0.0.1:12365"); err != nil {
+		ln, err := net.Listen("tcp", "127.0.0.1:12365")
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		conn, err := ln.Accept()
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		err = serv.ServeConn(conn)
+		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
 	}()

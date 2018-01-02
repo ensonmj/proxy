@@ -10,6 +10,7 @@ import (
 	"github.com/ensonmj/gosocks5"
 	"github.com/ensonmj/proxy/socks5"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 // *********************************** proxy **********************************
@@ -46,17 +47,17 @@ func NewSocksHandler(
 	}
 }
 
-func (h *SocksHandler) ServeConn(rwc io.ReadWriteCloser) {
+func (h *SocksHandler) ServeConn(rw io.ReadWriter) error {
 	handler := socks5.New(h.cfg)
-	handler.ServeConn(rwc.(net.Conn))
+	return handler.ServeConn(rw)
 }
 
 // *********************************** chain **********************************
 type Socks5ChainNode struct {
-	Node
+	*Node
 }
 
-func NewSocks5ChainNode(n Node) *Socks5ChainNode {
+func NewSocks5ChainNode(n *Node) *Socks5ChainNode {
 	return &Socks5ChainNode{
 		Node: n,
 	}
@@ -75,8 +76,11 @@ func (n *Socks5ChainNode) Connect() (net.Conn, error) {
 	return conn, err
 }
 
+func (n *Socks5ChainNode) RegisterHook(c net.Conn) net.Conn {
+	return WithOutHooks(c, n.Node.hooks...)
+}
+
 func (n *Socks5ChainNode) Handshake(c net.Conn) error {
-	// log.Println("handshake with socks5 node")
 	conn := gosocks5.ClientConn(c, gosocks5.NewAuthenticator([]*url.Userinfo{n.Node.URL.User}))
 	if err := conn.Handleshake(); err != nil {
 		return errors.Wrap(err, "handleshake")
@@ -85,27 +89,30 @@ func (n *Socks5ChainNode) Handshake(c net.Conn) error {
 	return nil
 }
 
-func (n *Socks5ChainNode) ForwardRequest(c net.Conn, url *url.URL) (net.Conn, error) {
-	// log.Printf("forward request to hop[%s] by socks5", url.String())
+func (n *Socks5ChainNode) ForwardRequest(c net.Conn, url *url.URL) error {
+	log.WithFields(logrus.Fields{
+		"chainnode": *n.Node,
+		"hop":       url.Host,
+	}).Debugf("forward request to next hop by SOCKS5")
 	addr, err := parseAddr(url.Host)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req := gosocks5.NewRequest(gosocks5.CmdConnect, addr)
 
 	if err := req.Write(c); err != nil {
-		return nil, errors.Wrap(err, "forward request")
+		return errors.Wrap(err, "forward request")
 	}
 
 	resp, err := gosocks5.ReadReply(c)
 	if err != nil {
-		return nil, errors.Wrap(err, "read socks reply")
+		return errors.Wrap(err, "read socks reply")
 	}
 	if resp.Rep != gosocks5.Succeeded {
-		return nil, errors.New("proxy refused connection")
+		return errors.New("proxy refused connection")
 	}
 
-	return Socks5HookConn{Conn: c}, nil
+	return nil
 }
 
 func parseAddr(addr string) (*gosocks5.Addr, error) {
@@ -132,18 +139,4 @@ func parseAddr(addr string) (*gosocks5.Addr, error) {
 		Host: host,
 		Port: uint16(p),
 	}, nil
-}
-
-// *********************************** hook ***********************************
-type Socks5HookConn struct {
-	net.Conn
-}
-
-func (c Socks5HookConn) Read(b []byte) (n int, err error) {
-	return c.Conn.Read(b)
-}
-
-func (c Socks5HookConn) Write(b []byte) (n int, err error) {
-	return c.Conn.Write(b)
-
 }

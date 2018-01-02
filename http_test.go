@@ -5,22 +5,23 @@ import (
 )
 
 // client -> http proxy -> http server
-func TestConnectHttpServer(t *testing.T) {
-	ln := setupProxyServer(t, nil, nil)
+func TestHttpServer(t *testing.T) {
+	// node for both client and proxy server
+	n := setupNode(t, "http://0:0")
+
+	ln := setupProxyServer(t, n, nil)
 	defer ln.Close()
 
 	ts := setupHttpServer(t, false)
 	tc := setupHttpClient(t, ts, "http", ln.Addr().String())
 
 	// test action
-	doTestProxy(t, ts, tc, nil)
+	doTestProxy(t, ts, tc, n)
 }
 
-func TestConnectHttpServerWithAuth(t *testing.T) {
-	n, err := ParseNode("http://user:password@127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestHttpServerWithAuth(t *testing.T) {
+	// node for both client and proxy server
+	n := setupNode(t, "http://user:password@0:0")
 
 	ln := setupProxyServer(t, n, nil)
 	defer ln.Close()
@@ -33,13 +34,16 @@ func TestConnectHttpServerWithAuth(t *testing.T) {
 }
 
 // client(CONNECT) -> http proxy -> https server
-func TestConnectHttpsServer(t *testing.T) {
-	ln := setupProxyServer(t, nil, nil)
+func TestHttpsServer(t *testing.T) {
+	// node for both client and proxy server
+	n := setupNode(t, "http://0:0")
+
+	ln := setupProxyServer(t, n, nil)
 	defer ln.Close()
 
 	ts := setupHttpServer(t, true)
 	tc := setupHttpClient(t, ts, "http", ln.Addr().String())
 
 	// test action
-	doTestProxy(t, ts, tc, nil)
+	doTestProxy(t, ts, tc, n)
 }

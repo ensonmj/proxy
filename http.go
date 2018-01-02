@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"sync"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -46,19 +45,12 @@ func NewHttpHandler(
 	}
 }
 
-func (h *HttpHandler) ServeConn(rwc io.ReadWriteCloser) {
-	defer rwc.Close()
-
-	bufReader := bufio.NewReader(rwc)
+func (h *HttpHandler) ServeConn(rw io.ReadWriter) error {
+	bufReader := bufio.NewReader(rw)
 	req, err := http.ReadRequest(bufReader)
 	if err != nil {
-		if err != io.EOF {
-			log.WithError(err).Error("[http] read http request")
-		}
-		return
+		return errors.WithStack(err)
 	}
-	// buf, _ := dumpRequest(req, false)
-	// fmt.Println(string(buf))
 
 	// need auth
 	if h.node != nil && h.node.URL.User != nil {
@@ -70,7 +62,7 @@ func (h *HttpHandler) ServeConn(rwc io.ReadWriteCloser) {
 				"password": reqPass,
 				"ok":       ok,
 			}).Warn("[http] auth failed")
-			return
+			return errors.New("[http] auth failed")
 		}
 
 		srvUser := h.node.URL.User.Username()
@@ -80,7 +72,7 @@ func (h *HttpHandler) ServeConn(rwc io.ReadWriteCloser) {
 				"password": reqPass,
 				"ok":       ok,
 			}).Warn("[http] auth failed")
-			return
+			return errors.New("[http] auth failed")
 		}
 
 		srvPass, needPass := h.node.URL.User.Password()
@@ -90,51 +82,48 @@ func (h *HttpHandler) ServeConn(rwc io.ReadWriteCloser) {
 				"password": reqPass,
 				"ok":       ok,
 			}).Warn("[http] auth failed")
-			return
+			return errors.New("[http] auth failed")
 		}
 	}
 
 	if req.Method == "CONNECT" {
-		host := req.URL.Host
+		host := req.Host
 		if !h.hasPort.MatchString(host) {
 			host += ":80"
 		}
 		targetConn, err := h.dialCtx(req.Context(), "tcp", host)
 		if err != nil {
-			httpResp(rwc, req, 500, err.Error())
-			return
+			httpResp(rw, req, 500, err.Error())
+			return errors.WithStack(err)
 		}
 		defer targetConn.Close()
-		httpResp(rwc, req, 200, "")
-		log.WithField("host", host).Debug("[http] success dial server")
 
-		connIO(targetConn, rwc)
+		httpResp(rw, req, 200, "")
+		log.WithField("server", host).Debug("[http] success connect to server")
 
-		return
+		return connIO(targetConn, rw)
 	}
 
 	for {
 		if !req.URL.IsAbs() {
-			httpResp(rwc, req, 500,
-				"This is a proxy server. Does not respond to non-proxy requests.")
-			return
+			httpResp(rw, req, 500, "[http] proxy requset url is not absolute")
+			return errors.New("[http] proxy requset url is not absolute")
 		}
-
 		removeProxyHeaders(req)
 
 		resp, err := h.client.Do(req)
 		if err != nil {
-			httpResp(rwc, req, 500, err.Error())
-			return
+			httpResp(rw, req, 500, err.Error())
+			return errors.WithStack(err)
 		}
-		resp.Write(rwc)
+		resp.Write(rw)
 
 		req, err = http.ReadRequest(bufReader)
 		if err != nil {
 			if err != io.EOF {
-				log.WithError(err).Error("[http] read http request")
+				return errors.WithStack(err)
 			}
-			return
+			return nil
 		}
 	}
 }
@@ -161,6 +150,11 @@ func getBasicAuth(req *http.Request) (username, password string, ok bool) {
 }
 
 func httpResp(w io.Writer, req *http.Request, code int, body string) {
+	log.WithFields(logrus.Fields{
+		"status": code,
+		"body":   body,
+	}).Debug("[http] send response")
+
 	resp := &http.Response{
 		Request:       req,
 		StatusCode:    code,
@@ -172,12 +166,14 @@ func httpResp(w io.Writer, req *http.Request, code int, body string) {
 	}
 	if len(body) > 0 {
 		resp.Body = ioutil.NopCloser(bytes.NewBufferString(body))
-
 	}
-	resp.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	resp.Header.Set("X-Content-Type-Options", "nosniff")
+	resp.Header.Set("Content-Type", "text/plain; charset=utf-8")
 
-	resp.Write(w)
+	// cache all bytes to only write once
+	buf := bytes.NewBuffer(nil)
+	resp.Write(buf)
+	w.Write(buf.Bytes())
 }
 
 func removeProxyHeaders(req *http.Request) {
@@ -203,30 +199,43 @@ func removeProxyHeaders(req *http.Request) {
 	req.Header.Del("Connection")
 }
 
-func connIO(dst, src io.ReadWriter) {
-	var wg sync.WaitGroup
-	wg.Add(2)
+func connIO(dst, src io.ReadWriter) error {
+	srcToDstC := make(chan error)
+	dstToSrcC := make(chan error)
+	go func() {
+		_, err := io.Copy(dst, src)
+		srcToDstC <- err
+	}()
+	go func() {
+		_, err := io.Copy(src, dst)
+		dstToSrcC <- err
+	}()
 
-	go copyData(dst, src, &wg)
-	go copyData(src, dst, &wg)
-
-	wg.Wait()
-}
-
-func copyData(dst io.Writer, src io.Reader, wg *sync.WaitGroup) {
-	if _, err := io.Copy(dst, src); err != nil && err != io.EOF {
-		log.WithError(err).Error("[http] copy connection content")
+	var srcToDstErr, dstToSrcErr error
+	for {
+		select {
+		case srcToDstErr = <-srcToDstC:
+			srcToDstC = nil
+		case dstToSrcErr = <-dstToSrcC:
+			dstToSrcC = nil
+		}
+		if srcToDstC == nil && dstToSrcC == nil {
+			break
+		}
+	}
+	if srcToDstErr != nil || dstToSrcC != nil {
+		return errors.Errorf("[http] connIO err[%s <=> %s]", dstToSrcErr, srcToDstErr)
 	}
 
-	wg.Done()
+	return nil
 }
 
 // *********************************** chain **********************************
 type HttpChainNode struct {
-	Node
+	*Node
 }
 
-func NewHttpChainNode(n Node) *HttpChainNode {
+func NewHttpChainNode(n *Node) *HttpChainNode {
 	return &HttpChainNode{
 		Node: n,
 	}
@@ -237,6 +246,7 @@ func (n *HttpChainNode) URL() *url.URL {
 }
 
 func (n *HttpChainNode) Connect() (net.Conn, error) {
+	log.WithField("chainnode", *n.Node).Debug("connect to chain")
 	conn, err := net.Dial("tcp", n.URL().Host)
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -245,62 +255,54 @@ func (n *HttpChainNode) Connect() (net.Conn, error) {
 	return conn, err
 }
 
+func (n *HttpChainNode) RegisterHook(c net.Conn) net.Conn {
+	return WithOutHooks(c, n.Node.hooks...)
+}
+
 func (n *HttpChainNode) Handshake(c net.Conn) error {
-	// log.Println("handshake with http node")
+	log.WithField("chainnode", *n.Node).Debug("handshake with http chain node")
 	return nil
 }
 
-func (n *HttpChainNode) ForwardRequest(c net.Conn, url *url.URL) (net.Conn, error) {
-	// log.Printf("forward request to hop[%s] by HTTP", url.String())
+func (n *HttpChainNode) ForwardRequest(c net.Conn, uri *url.URL) error {
+	log.WithFields(logrus.Fields{
+		"chainnode": *n.Node,
+		"hop":       uri.Host,
+	}).Debugf("forward request to next hop by HTTP")
 	req := &http.Request{
 		Method:     http.MethodConnect,
-		URL:        url,
-		Host:       url.Host,
+		URL:        &url.URL{Opaque: uri.Host},
+		Host:       uri.Host,
 		ProtoMajor: 1,
 		ProtoMinor: 1,
 		Header:     make(http.Header),
 	}
 	req.Header.Set("Proxy-Connection", "keep-alive")
-	if url.User != nil {
-		user := url.User.Username()
-		pass, _ := url.User.Password()
+	if uri.User != nil {
+		user := uri.User.Username()
+		pass, _ := uri.User.Password()
 		req.Header.Set("Proxy-Authorization", basicAuth(user, pass))
 	}
-
 	if err := req.Write(c); err != nil {
-		return nil, errors.Wrap(err, "forward request")
+		return errors.Wrap(err, "forward request")
 	}
 
 	resp, err := http.ReadResponse(bufio.NewReader(c), req)
 	if err != nil {
-		return nil, errors.Wrap(err, "forward request read response")
+		return errors.Wrap(err, "forward request read response")
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
-			return nil, errors.Wrap(err, "forward request clear body")
+			return errors.Wrap(err, "forward request clear body")
 		}
-		return nil, errors.New("proxy refused connection: " + string(resp))
+		return errors.New("proxy refused connection: " + string(resp))
 	}
 
-	return HttpHookConn{Conn: c}, nil
+	return nil
 }
 
 func basicAuth(username, password string) string {
 	auth := username + ":" + password
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
-}
-
-// *********************************** hook ***********************************
-type HttpHookConn struct {
-	net.Conn
-}
-
-func (c HttpHookConn) Read(b []byte) (n int, err error) {
-	return c.Conn.Read(b)
-}
-
-func (c HttpHookConn) Write(b []byte) (n int, err error) {
-	return c.Conn.Write(b)
-
 }

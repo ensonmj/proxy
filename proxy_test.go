@@ -36,7 +36,24 @@ func setup() {
 
 func teardown() {}
 
-// n used for auth
+// replace node fake host(0:0) with real listen host
+func replaceNodeHost(n *Node, host string) *Node {
+	n.URL.Host = host
+	return n
+}
+
+// host and port will be not used for testing, so we can use 0:0 as host:port in url
+func setupNode(t *testing.T, url string) *Node {
+	t.Helper()
+
+	n, err := ParseNode(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// n used for auth and hook
 // dialCtx used for chain
 func setupProxyServer(t *testing.T,
 	n *Node,
@@ -47,6 +64,7 @@ func setupProxyServer(t *testing.T,
 	if err != nil {
 		t.Fatal(err)
 	}
+	replaceNodeHost(n, ln.Addr().String())
 	go func() {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -59,27 +77,31 @@ func setupProxyServer(t *testing.T,
 	return ln
 }
 
-func setupChainServers(t *testing.T, schemes ...string) (
+// batch to setup chain server
+func setupChainServers(t *testing.T, urls ...string) (
 	dialCtx func(context.Context, string, string) (net.Conn, error),
+	// chain proxy servers
 	release func()) {
 	var nodes []string
 	var lns []net.Listener
-	for _, scheme := range schemes {
-		ln := setupProxyServer(t, nil, nil)
+	for _, url := range urls {
+		n := setupNode(t, url)
+		c, _ := NewProxyChain()
+		ln := setupProxyServer(t, n, c.DialContext)
 		lns = append(lns, ln)
-		nodes = append(nodes, scheme+"://"+ln.Addr().String())
+		nodes = append(nodes, replaceNodeHost(n, ln.Addr().String()).URL.String())
 	}
-	chain, err := NewProxyChain(nodes...)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	release = func() {
 		for _, ln := range lns {
 			ln.Close()
 		}
 	}
 
+	// chain nodes for local proxy server
+	chain, err := NewProxyChain(nodes...)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return chain.DialContext, release
 }
 
@@ -111,7 +133,7 @@ func setupHttpClient(t *testing.T, ts *httptest.Server, scheme string, addr stri
 	tc := ts.Client()
 
 	switch scheme {
-	case "http":
+	case "http", "https":
 		if tr, ok := tc.Transport.(*http.Transport); ok {
 			tr.Proxy = http.ProxyURL(proxyURL)
 			return tc
@@ -152,8 +174,6 @@ func doTestProxy(t *testing.T, ts *httptest.Server, tc *http.Client, n *Node) {
 		t.Logf("http request with username:%s, password:%s", user, pass)
 		req.Header.Set("Proxy-Authorization", basicAuth(user, pass))
 	}
-	// buf, _ := dumpRequest(req, false)
-	// fmt.Println(string(buf))
 
 	resp, err := tc.Do(req)
 	if err != nil {

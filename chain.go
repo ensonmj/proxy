@@ -19,11 +19,12 @@ type ChainNode interface {
 	// Connect only used for first node of the chain
 	// this net.Conn not used for hook
 	Connect() (net.Conn, error)
+	// RegisterHook register hook before Handshake for data process
+	RegisterHook(net.Conn) net.Conn
 	// Handshake complete authentication with node
 	Handshake(net.Conn) error
 	// ForwardRequest ask node to connect to next hop(proxy server or target server)
-	// return an wrapper net.Conn used for hook
-	ForwardRequest(net.Conn, *url.URL) (net.Conn, error)
+	ForwardRequest(net.Conn, *url.URL) error
 }
 
 // Proxy chain holds a list of proxy nodes
@@ -41,9 +42,9 @@ func NewProxyChain(urls ...string) (*ProxyChain, error) {
 		var cn ChainNode
 		switch n.URL.Scheme {
 		case "http":
-			cn = NewHttpChainNode(*n)
+			cn = NewHttpChainNode(n)
 		case "socks5":
-			cn = NewSocks5ChainNode(*n)
+			cn = NewSocks5ChainNode(n)
 		default:
 			return nil, errors.Errorf("unknown scheme:%s", n.URL.Scheme)
 		}
@@ -54,10 +55,10 @@ func NewProxyChain(urls ...string) (*ProxyChain, error) {
 
 func (pc *ProxyChain) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	log.WithFields(logrus.Fields{
-		"chain":   pc,
 		"network": network,
-		"addr":    addr,
-	}).Debug("connect to server with chain")
+		"target":  addr,
+		"chain":   pc,
+	}).Debug("connecting to target with chain")
 	if len(pc.Nodes) == 0 {
 		return net.DialTimeout(network, addr, DialTimeout)
 	}
@@ -70,6 +71,9 @@ func (pc *ProxyChain) DialContext(ctx context.Context, network, addr string) (ne
 
 	lastIdx := len(pc.Nodes) - 1
 	for i, n := range pc.Nodes {
+		//regitster hook
+		conn = n.RegisterHook(conn)
+
 		// handshake with current hop
 		n.Handshake(conn)
 
@@ -88,8 +92,7 @@ func (pc *ProxyChain) DialContext(ctx context.Context, network, addr string) (ne
 				return nil, errors.WithStack(err)
 			}
 		}
-		conn, err = n.ForwardRequest(conn, url)
-		if err != nil {
+		if err := n.ForwardRequest(conn, url); err != nil {
 			return nil, err
 		}
 	}

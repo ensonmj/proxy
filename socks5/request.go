@@ -7,6 +7,9 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
+
+	"github.com/pkg/errors"
 )
 
 const (
@@ -115,7 +118,7 @@ func NewRequest(bufConn io.Reader) (*Request, error) {
 }
 
 // handleRequest is used for request processing after authentication
-func (s *Server) handleRequest(req *Request, conn conn) error {
+func (s *Server) handleRequest(req *Request, conn io.Writer) error {
 	ctx := context.Background()
 
 	// Resolve the address if we have a FQDN
@@ -155,7 +158,7 @@ func (s *Server) handleRequest(req *Request, conn conn) error {
 }
 
 // handleConnect is used to handle a connect command
-func (s *Server) handleConnect(ctx context.Context, conn conn, req *Request) error {
+func (s *Server) handleConnect(ctx context.Context, conn io.Writer, req *Request) error {
 	// Check if this is allowed
 	if ctx_, ok := s.config.Rules.Allow(ctx, req); !ok {
 		if err := sendReply(conn, ruleFailure, nil); err != nil {
@@ -197,23 +200,43 @@ func (s *Server) handleConnect(ctx context.Context, conn conn, req *Request) err
 	}
 
 	// Start proxying
-	errCh := make(chan error, 2)
-	go proxy(target, req.bufConn, errCh)
-	go proxy(conn, target, errCh)
+	srcToDstC := make(chan error)
+	dstToSrcC := make(chan error)
+	go func() {
+		_, err := io.Copy(target, req.bufConn)
+		srcToDstC <- err
+	}()
+	go func() {
+		_, err := io.Copy(conn, target)
+		dstToSrcC <- err
+	}()
 
-	// Wait
-	for i := 0; i < 2; i++ {
-		e := <-errCh
-		if e != nil {
-			// return from this function closes target (and conn).
-			return e
+	var srcToDstErr, dstToSrcErr error
+	for {
+		select {
+		case srcToDstErr = <-srcToDstC:
+			srcToDstC = nil
+		case dstToSrcErr = <-dstToSrcC:
+			dstToSrcC = nil
+		}
+		if srcToDstC == nil && dstToSrcC == nil {
+			break
 		}
 	}
+	if srcToDstErr != nil || dstToSrcC != nil {
+		return errors.Errorf("[socks] connIO err[%s <=> %s]", dstToSrcErr, srcToDstErr)
+	}
+
 	return nil
 }
 
+func copyData(dst io.Writer, src io.Reader, wg *sync.WaitGroup, err error) {
+	_, err = io.Copy(dst, src)
+	wg.Done()
+}
+
 // handleBind is used to handle a connect command
-func (s *Server) handleBind(ctx context.Context, conn conn, req *Request) error {
+func (s *Server) handleBind(ctx context.Context, conn io.Writer, req *Request) error {
 	// Check if this is allowed
 	if ctx_, ok := s.config.Rules.Allow(ctx, req); !ok {
 		if err := sendReply(conn, ruleFailure, nil); err != nil {
@@ -232,7 +255,7 @@ func (s *Server) handleBind(ctx context.Context, conn conn, req *Request) error 
 }
 
 // handleAssociate is used to handle a connect command
-func (s *Server) handleAssociate(ctx context.Context, conn conn, req *Request) error {
+func (s *Server) handleAssociate(ctx context.Context, conn io.Writer, req *Request) error {
 	// Check if this is allowed
 	if ctx_, ok := s.config.Rules.Allow(ctx, req); !ok {
 		if err := sendReply(conn, ruleFailure, nil); err != nil {
@@ -346,18 +369,4 @@ func sendReply(w io.Writer, resp uint8, addr *AddrSpec) error {
 	// Send the message
 	_, err := w.Write(msg)
 	return err
-}
-
-type closeWriter interface {
-	CloseWrite() error
-}
-
-// proxy is used to suffle data from src to destination, and sends errors
-// down a dedicated channel
-func proxy(dst io.Writer, src io.Reader, errCh chan error) {
-	_, err := io.Copy(dst, src)
-	if tcpConn, ok := dst.(closeWriter); ok {
-		tcpConn.CloseWrite()
-	}
-	errCh <- err
 }

@@ -3,9 +3,11 @@ package proxy
 import (
 	"context"
 	"io"
+	"io/ioutil"
 	"net"
 
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -13,7 +15,7 @@ const (
 )
 
 type Handler interface {
-	ServeConn(io.ReadWriteCloser)
+	ServeConn(io.ReadWriter) error
 }
 
 // **********************************************************************************
@@ -32,7 +34,7 @@ type Handler interface {
 //
 // **********************************************************************************
 type Server struct {
-	Node
+	*Node
 	DialCtx func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
@@ -46,7 +48,7 @@ func NewServer(localURL string, chainURL ...string) (*Server, error) {
 		return nil, err
 	}
 	return &Server{
-		Node:    *n,
+		Node:    n,
 		DialCtx: chain.DialContext,
 	}, nil
 }
@@ -67,43 +69,92 @@ func (s *Server) Serve(ln net.Listener) error {
 			log.WithError(err).Error("[proxy] accept connection closed")
 			return err
 		}
+		log.WithFields(logrus.Fields{
+			"localAddr":  conn.LocalAddr(),
+			"remoteAddr": conn.RemoteAddr(),
+			"node":       *s.Node,
+			"hooks":      s.Node.hooks,
+		}).Debug("accept proxy request")
 
-		go handleConn(&s.Node, conn, s.DialCtx)
+		go handleConn(s.Node, conn, s.DialCtx)
 	}
 }
 
 func handleConn(node *Node, conn net.Conn,
 	dialCtx func(context.Context, string, string) (net.Conn, error)) {
-	// http or socks5
-	b := make([]byte, 1024)
-	n, err := io.ReadAtLeast(conn, b, 2)
-	if err != nil {
-		log.WithError(err).Error("[proxy] failed to guess protocol")
-		return
-	}
+	defer conn.Close()
 
-	var h Handler
-	if b[0] == socks5Version {
+	// hook conn for data process
+	c := WithInHooks(conn, node.hooks...)
+
+	switch node.URL.Scheme {
+	case "http":
+		err := NewHttpHandler(node, dialCtx).ServeConn(c)
+		if err != nil {
+			log.WithError(err).Warn("http proxy failed")
+		}
+	case "socks5":
+		err := NewSocksHandler(node, dialCtx).ServeConn(c)
+		if err != nil {
+			log.WithError(err).Warn("socks5 proxy failed")
+		}
+	case "ghost":
+		fallthrough
+	default:
+		// select handler automatically
+		// all handlers must not write data before proxy protocol verified
+		sockR, sockW := io.Pipe()
+		httpR, httpW := io.Pipe()
+		go func() {
+			defer sockW.Close()
+			defer httpW.Close()
+
+			mw := io.MultiWriter(sockW, httpW)
+
+			io.Copy(mw, c)
+		}()
+
+		sockErrC := make(chan error)
+		httpErrC := make(chan error)
 		// socks5
-		h = NewSocksHandler(node, dialCtx)
-	} else {
+		go func() {
+			sockErrC <- NewSocksHandler(node, dialCtx).ServeConn(
+				&wrapper{Reader: sockR, Writer: c})
+			io.Copy(ioutil.Discard, sockR)
+		}()
 		// HTTP/1.x
-		h = NewHttpHandler(node, dialCtx)
-	}
+		go func() {
+			httpErrC <- NewHttpHandler(node, dialCtx).ServeConn(
+				&wrapper{Reader: httpR, Writer: c})
+			io.Copy(ioutil.Discard, httpR)
+		}()
 
-	h.ServeConn(&connRWC{Conn: conn, b: b[:n]})
+		var sockErr, httpErr error
+		for {
+			select {
+			case sockErr = <-sockErrC:
+				sockErrC = nil
+			case httpErr = <-httpErrC:
+				httpErrC = nil
+			}
+		}
+		if sockErr != nil && httpErr != nil {
+			log.WithFields(logrus.Fields{
+				"http":  httpErr,
+				"socks": sockErr,
+			}).Error("http and socks5 all failed")
+		}
+	}
 }
 
-type connRWC struct {
-	net.Conn
-	b []byte
+type wrapper struct {
+	io.Reader
+	io.Writer
 }
 
-func (r *connRWC) Read(p []byte) (n int, err error) {
-	if len(r.b) == 0 {
-		return r.Conn.Read(p)
-	}
-	n = copy(p, r.b)
-	r.b = r.b[n:]
-	return
+func (c *wrapper) Read(b []byte) (n int, err error) {
+	return c.Reader.Read(b)
+}
+func (c *wrapper) Write(b []byte) (n int, err error) {
+	return c.Writer.Write(b)
 }

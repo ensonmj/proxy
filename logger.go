@@ -2,10 +2,6 @@ package proxy
 
 import "github.com/sirupsen/logrus"
 
-// func init() {
-// 	log = logrus.New()
-// }
-
 var (
 	log = logrus.New()
 )

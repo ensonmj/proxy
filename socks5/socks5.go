@@ -3,10 +3,10 @@ package socks5
 import (
 	"bufio"
 	"context"
-	"fmt"
-	"log"
+	"io"
 	"net"
-	"os"
+
+	"github.com/pkg/errors"
 )
 
 const (
@@ -41,10 +41,6 @@ type Config struct {
 	// BindIP is used for bind or udp associate
 	BindIP net.IP
 
-	// Logger can be used to provide a custom log target.
-	// Defaults to stdout.
-	Logger *log.Logger
-
 	// Optional function for dialing out
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 }
@@ -77,11 +73,6 @@ func New(conf *Config) *Server {
 		conf.Rules = PermitAll()
 	}
 
-	// Ensure we have a log target
-	if conf.Logger == nil {
-		conf.Logger = log.New(os.Stdout, "", log.LstdFlags)
-	}
-
 	server := &Server{
 		config: conf,
 	}
@@ -96,51 +87,41 @@ func New(conf *Config) *Server {
 }
 
 // ServeConn is used to serve a single connection.
-func (s *Server) ServeConn(conn net.Conn) error {
-	defer conn.Close()
+func (s *Server) ServeConn(conn io.ReadWriter) error {
+	// defer conn.Close()
 	bufConn := bufio.NewReader(conn)
 
 	// Read the version byte
 	version := []byte{0}
 	if _, err := bufConn.Read(version); err != nil {
-		s.config.Logger.Printf("[ERR] socks: Failed to get version byte: %v", err)
-		return err
+		return errors.Wrap(err, "[ERR] socks: failed to get version byte")
 	}
 
 	// Ensure we are compatible
 	if version[0] != socks5Version {
-		err := fmt.Errorf("Unsupported SOCKS version: %v", version)
-		s.config.Logger.Printf("[ERR] socks: %v", err)
-		return err
+		return errors.Errorf("[ERR] socks: unsupported SOCKS version[%v]", version)
 	}
 
 	// Authenticate the connection
 	authContext, err := s.authenticate(conn, bufConn)
 	if err != nil {
-		err = fmt.Errorf("Failed to authenticate: %v", err)
-		s.config.Logger.Printf("[ERR] socks: %v", err)
-		return err
+		return errors.Wrap(err, "[ERR] socks: failed to authenticate")
 	}
 
 	request, err := NewRequest(bufConn)
 	if err != nil {
 		if err == unrecognizedAddrType {
 			if err := sendReply(conn, addrTypeNotSupported, nil); err != nil {
-				return fmt.Errorf("Failed to send reply: %v", err)
+				return errors.Wrap(err, "[ERR] socks: failed to send reply")
 			}
 		}
-		return fmt.Errorf("Failed to read destination address: %v", err)
+		return errors.Wrap(err, "[ERR] socks: failed to read destination address")
 	}
 	request.AuthContext = authContext
-	if client, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
-		request.RemoteAddr = &AddrSpec{IP: client.IP, Port: client.Port}
-	}
 
 	// Process the client request
 	if err := s.handleRequest(request, conn); err != nil {
-		err = fmt.Errorf("Failed to handle request: %v", err)
-		s.config.Logger.Printf("[ERR] socks: %v", err)
-		return err
+		return errors.Wrap(err, "[ERR] socks: failed to handle request")
 	}
 
 	return nil
