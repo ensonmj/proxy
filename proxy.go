@@ -59,6 +59,8 @@ func (s *Server) ListenAndServe() error {
 	if err != nil {
 		return errors.WithStack(err)
 	}
+	defer ln.Close()
+
 	return s.Serve(ln)
 }
 
