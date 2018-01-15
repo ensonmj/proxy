@@ -3,20 +3,16 @@ package socks5
 import (
 	"fmt"
 	"io"
+
+	"github.com/ensonmj/proxy/cred"
+	"github.com/pkg/errors"
 )
 
 const (
-	NoAuth          = uint8(0)
-	noAcceptable    = uint8(255)
-	UserPassAuth    = uint8(2)
 	userAuthVersion = uint8(1)
 	authSuccess     = uint8(0)
 	authFailure     = uint8(1)
-)
-
-var (
-	UserAuthFailed  = fmt.Errorf("User authentication failed")
-	NoSupportedAuth = fmt.Errorf("No supported authentication mechanism")
+	noAcceptable    = uint8(255)
 )
 
 // A Request encapsulates authentication state provided
@@ -26,7 +22,7 @@ type AuthContext struct {
 	Method uint8
 	// Payload provided during negotiation.
 	// Keys depend on the used auth method.
-	// For UserPassauth contains Username
+	// For MethodUserPass contains Username
 	Payload map[string]string
 }
 
@@ -39,27 +35,27 @@ type Authenticator interface {
 type NoAuthAuthenticator struct{}
 
 func (a NoAuthAuthenticator) GetCode() uint8 {
-	return NoAuth
+	return MethodNoAuth
 }
 
 func (a NoAuthAuthenticator) Authenticate(reader io.Reader, writer io.Writer) (*AuthContext, error) {
-	_, err := writer.Write([]byte{socks5Version, NoAuth})
-	return &AuthContext{NoAuth, nil}, err
+	_, err := writer.Write([]byte{SocksVer5, MethodNoAuth})
+	return &AuthContext{MethodNoAuth, nil}, err
 }
 
 // UserPassAuthenticator is used to handle username/password based
 // authentication
 type UserPassAuthenticator struct {
-	Credentials CredentialStore
+	Credentials cred.CredentialStore
 }
 
 func (a UserPassAuthenticator) GetCode() uint8 {
-	return UserPassAuth
+	return MethodUserPass
 }
 
 func (a UserPassAuthenticator) Authenticate(reader io.Reader, writer io.Writer) (*AuthContext, error) {
 	// Tell the client to use user/pass auth
-	if _, err := writer.Write([]byte{socks5Version, UserPassAuth}); err != nil {
+	if _, err := writer.Write([]byte{SocksVer5, MethodUserPass}); err != nil {
 		return nil, err
 	}
 
@@ -102,38 +98,18 @@ func (a UserPassAuthenticator) Authenticate(reader io.Reader, writer io.Writer) 
 		if _, err := writer.Write([]byte{userAuthVersion, authFailure}); err != nil {
 			return nil, err
 		}
-		return nil, UserAuthFailed
+		return nil, ErrAuthFailure
 	}
 
 	// Done
-	return &AuthContext{UserPassAuth, map[string]string{"Username": string(user)}}, nil
-}
-
-// authenticate is used to handle connection authentication
-func (s *Server) authenticate(conn io.Writer, bufConn io.Reader) (*AuthContext, error) {
-	// Get the methods
-	methods, err := readMethods(bufConn)
-	if err != nil {
-		return nil, fmt.Errorf("Failed to get auth methods: %v", err)
-	}
-
-	// Select a usable method
-	for _, method := range methods {
-		cator, found := s.authMethods[method]
-		if found {
-			return cator.Authenticate(bufConn, conn)
-		}
-	}
-
-	// No usable method found
-	return nil, noAcceptableAuth(conn)
+	return &AuthContext{MethodUserPass, map[string]string{"Username": string(user)}}, nil
 }
 
 // noAcceptableAuth is used to handle when we have no eligible
 // authentication mechanism
 func noAcceptableAuth(conn io.Writer) error {
-	conn.Write([]byte{socks5Version, noAcceptable})
-	return NoSupportedAuth
+	conn.Write([]byte{SocksVer5, noAcceptable})
+	return ErrBadMethod
 }
 
 // readMethods is used to read the number of methods
@@ -141,7 +117,7 @@ func noAcceptableAuth(conn io.Writer) error {
 func readMethods(r io.Reader) ([]byte, error) {
 	header := []byte{0}
 	if _, err := r.Read(header); err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "[SOCKS5] failed to get auth methods: %v", err)
 	}
 
 	numMethods := int(header[0])

@@ -89,14 +89,15 @@ func handleConn(node *Node, conn net.Conn,
 	// hook conn for data process
 	c := WithInHooks(conn, node.hooks...)
 
+	user := node.URL.User
 	switch node.URL.Scheme {
 	case "http":
-		err := NewHttpHandler(node, dialCtx).ServeConn(c)
+		err := NewHttpHandler(user, dialCtx).ServeConn(c)
 		if err != nil {
 			log.WithError(err).Warn("http proxy failed")
 		}
 	case "socks5":
-		err := NewSocksHandler(node, dialCtx).ServeConn(c)
+		err := NewSocksHandler(user, dialCtx).ServeConn(c)
 		if err != nil {
 			log.WithError(err).Warn("socks5 proxy failed")
 		}
@@ -120,13 +121,13 @@ func handleConn(node *Node, conn net.Conn,
 		httpErrC := make(chan error)
 		// socks5
 		go func() {
-			sockErrC <- NewSocksHandler(node, dialCtx).ServeConn(
+			sockErrC <- NewSocksHandler(user, dialCtx).ServeConn(
 				&wrapper{Reader: sockR, Writer: c})
 			io.Copy(ioutil.Discard, sockR)
 		}()
 		// HTTP/1.x
 		go func() {
-			httpErrC <- NewHttpHandler(node, dialCtx).ServeConn(
+			httpErrC <- NewHttpHandler(user, dialCtx).ServeConn(
 				&wrapper{Reader: httpR, Writer: c})
 			io.Copy(ioutil.Discard, httpR)
 		}()

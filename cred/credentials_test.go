@@ -1,4 +1,4 @@
-package socks5
+package cred
 
 import (
 	"testing"

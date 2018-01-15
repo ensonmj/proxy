@@ -1,4 +1,4 @@
-package proxy
+package httpproxy
 
 import (
 	"bufio"
@@ -9,43 +9,53 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 
+	"github.com/ensonmj/proxy/cred"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
-// *********************************** proxy **********************************
-type HttpHandler struct {
-	node    *Node
+// Config is used to setup and configure a Server
+type Config struct {
+	// If provided, username/password authentication is enabled,
+	Credentials cred.CredentialStore
+
+	// Optional function for dialing out
+	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
+}
+
+// Server is reponsible for accepting connections and handling
+// the details of the SOCKS5 protocol
+type Server struct {
+	config *Config
+	// authMethods map[uint8]Authenticator
 	hasPort *regexp.Regexp
-	dialCtx func(ctx context.Context, network, addr string) (net.Conn, error)
 	client  http.Client
 }
 
-func NewHttpHandler(
-	n *Node,
-	dialCtx func(context.Context, string, string) (net.Conn, error)) *HttpHandler {
-	if dialCtx == nil {
-		dialCtx = func(ctx context.Context, network, addr string) (net.Conn, error) {
+func New(conf *Config) *Server {
+	// Ensure we have a dialer
+	if conf.Dial == nil {
+		conf.Dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return net.Dial(network, addr)
 		}
 	}
-	return &HttpHandler{
-		node:    n,
+
+	server := &Server{
+		config:  conf,
 		hasPort: regexp.MustCompile(`:\d+$`),
-		dialCtx: dialCtx,
 		client: http.Client{
 			Transport: &http.Transport{
-				DialContext: dialCtx,
+				DialContext: conf.Dial,
 			},
 		},
 	}
+
+	return server
 }
 
-func (h *HttpHandler) ServeConn(rw io.ReadWriter) error {
+func (h *Server) ServeConn(rw io.ReadWriter) error {
 	bufReader := bufio.NewReader(rw)
 	req, err := http.ReadRequest(bufReader)
 	if err != nil {
@@ -53,35 +63,20 @@ func (h *HttpHandler) ServeConn(rw io.ReadWriter) error {
 	}
 
 	// need auth
-	if h.node != nil && h.node.URL.User != nil {
-		log.WithField("node", h.node).Debug("[http] need auth")
+	if h.config.Credentials != nil {
+		// 	log.WithField("node", h.node).Debug("[http] need auth")
 		reqUser, reqPass, ok := getBasicAuth(req)
 		if !ok {
-			log.WithFields(logrus.Fields{
-				"username": reqUser,
-				"password": reqPass,
-				"ok":       ok,
-			}).Warn("[http] auth failed")
+			// log.WithFields(logrus.Fields{
+			// 	"username": reqUser,
+			// 	"password": reqPass,
+			// 	"ok":       ok,
+			// }).Warn("[http] auth failed")
 			return errors.New("[http] auth failed")
 		}
 
-		srvUser := h.node.URL.User.Username()
-		if reqUser != srvUser {
-			log.WithFields(logrus.Fields{
-				"username": reqUser,
-				"password": reqPass,
-				"ok":       ok,
-			}).Warn("[http] auth failed")
-			return errors.New("[http] auth failed")
-		}
-
-		srvPass, needPass := h.node.URL.User.Password()
-		if needPass && reqPass != srvPass {
-			log.WithFields(logrus.Fields{
-				"username": reqUser,
-				"password": reqPass,
-				"ok":       ok,
-			}).Warn("[http] auth failed")
+		// Verify the password
+		if !h.config.Credentials.Valid(reqUser, reqPass) {
 			return errors.New("[http] auth failed")
 		}
 	}
@@ -91,7 +86,7 @@ func (h *HttpHandler) ServeConn(rw io.ReadWriter) error {
 		if !h.hasPort.MatchString(host) {
 			host += ":80"
 		}
-		targetConn, err := h.dialCtx(req.Context(), "tcp", host)
+		targetConn, err := h.config.Dial(req.Context(), "tcp", host)
 		if err != nil {
 			httpResp(rw, req, 500, err.Error())
 			return errors.WithStack(err)
@@ -99,7 +94,7 @@ func (h *HttpHandler) ServeConn(rw io.ReadWriter) error {
 		defer targetConn.Close()
 
 		httpResp(rw, req, 200, "")
-		log.WithField("server", host).Debug("[http] success connect to server")
+		// log.WithField("server", host).Debug("[http] success connect to server")
 
 		return connIO(targetConn, rw)
 	}
@@ -150,10 +145,10 @@ func getBasicAuth(req *http.Request) (username, password string, ok bool) {
 }
 
 func httpResp(w io.Writer, req *http.Request, code int, body string) {
-	log.WithFields(logrus.Fields{
-		"status": code,
-		"body":   body,
-	}).Debug("[http] send response")
+	// log.WithFields(logrus.Fields{
+	// 	"status": code,
+	// 	"body":   body,
+	// }).Debug("[http] send response")
 
 	resp := &http.Response{
 		Request:       req,
@@ -228,81 +223,4 @@ func connIO(dst, src io.ReadWriter) error {
 	}
 
 	return nil
-}
-
-// *********************************** chain **********************************
-type HttpChainNode struct {
-	*Node
-}
-
-func NewHttpChainNode(n *Node) *HttpChainNode {
-	return &HttpChainNode{
-		Node: n,
-	}
-}
-
-func (n *HttpChainNode) URL() *url.URL {
-	return &n.Node.URL
-}
-
-func (n *HttpChainNode) Connect() (net.Conn, error) {
-	log.WithField("chainnode", *n.Node).Debug("connect to chain")
-	conn, err := net.Dial("tcp", n.URL().Host)
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-
-	return conn, err
-}
-
-func (n *HttpChainNode) RegisterHook(c net.Conn) net.Conn {
-	return WithOutHooks(c, n.Node.hooks...)
-}
-
-func (n *HttpChainNode) Handshake(c net.Conn) error {
-	log.WithField("chainnode", *n.Node).Debug("handshake with http chain node")
-	return nil
-}
-
-func (n *HttpChainNode) ForwardRequest(c net.Conn, uri *url.URL) error {
-	log.WithFields(logrus.Fields{
-		"chainnode": *n.Node,
-		"hop":       uri.Host,
-	}).Debugf("forward request to next hop by HTTP")
-	req := &http.Request{
-		Method:     http.MethodConnect,
-		URL:        &url.URL{Opaque: uri.Host},
-		Host:       uri.Host,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     make(http.Header),
-	}
-	req.Header.Set("Proxy-Connection", "keep-alive")
-	if uri.User != nil {
-		user := uri.User.Username()
-		pass, _ := uri.User.Password()
-		req.Header.Set("Proxy-Authorization", basicAuth(user, pass))
-	}
-	if err := req.Write(c); err != nil {
-		return errors.Wrap(err, "forward request")
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(c), req)
-	if err != nil {
-		return errors.Wrap(err, "forward request read response")
-	}
-	if resp.StatusCode != http.StatusOK {
-		resp, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			return errors.Wrap(err, "forward request clear body")
-		}
-		return errors.New("proxy refused connection: " + string(resp))
-	}
-
-	return nil
-}
-
-func basicAuth(username, password string) string {
-	auth := username + ":" + password
-	return "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
 }

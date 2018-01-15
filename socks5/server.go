@@ -1,14 +1,14 @@
 package socks5
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"strings"
-	"sync"
 
+	"github.com/ensonmj/proxy/cred"
 	"github.com/pkg/errors"
 )
 
@@ -37,35 +37,6 @@ var (
 	unrecognizedAddrType = fmt.Errorf("Unrecognized address type")
 )
 
-// AddressRewriter is used to rewrite a destination transparently
-type AddressRewriter interface {
-	Rewrite(ctx context.Context, request *Request) (context.Context, *AddrSpec)
-}
-
-// AddrSpec is used to return the target AddrSpec
-// which may be specified as IPv4, IPv6, or a FQDN
-type AddrSpec struct {
-	FQDN string
-	IP   net.IP
-	Port int
-}
-
-func (a *AddrSpec) String() string {
-	if a.FQDN != "" {
-		return fmt.Sprintf("%s (%s):%d", a.FQDN, a.IP, a.Port)
-	}
-	return fmt.Sprintf("%s:%d", a.IP, a.Port)
-}
-
-// Address returns a string suitable to dial; prefer returning IP-based
-// address, fallback to FQDN
-func (a AddrSpec) Address() string {
-	if 0 != len(a.IP) {
-		return net.JoinHostPort(a.IP.String(), strconv.Itoa(a.Port))
-	}
-	return net.JoinHostPort(a.FQDN, strconv.Itoa(a.Port))
-}
-
 // A Request represents request received by a server
 type Request struct {
 	// Protocol version
@@ -83,22 +54,149 @@ type Request struct {
 	bufConn      io.Reader
 }
 
-type conn interface {
-	Write([]byte) (int, error)
-	RemoteAddr() net.Addr
+// Config is used to setup and configure a Server
+type Config struct {
+	// AuthMethods can be provided to implement custom authentication
+	// By default, "auth-less" mode is enabled.
+	// For password-based auth use UserPassAuthenticator.
+	AuthMethods []Authenticator
+
+	// If provided, username/password authentication is enabled,
+	// by appending a UserPassAuthenticator to AuthMethods. If not provided,
+	// and AUthMethods is nil, then "auth-less" mode is enabled.
+	Credentials cred.CredentialStore
+
+	// Resolver can be provided to do custom name resolution.
+	// Defaults to DNSResolver if not provided.
+	Resolver NameResolver
+
+	// Rewriter can be used to transparently rewrite addresses.
+	// This is invoked before the RuleSet is invoked.
+	// Defaults to NoRewrite.
+	Rewriter AddressRewriter
+
+	// Optional function for dialing out
+	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-// NewRequest creates a new Request from the tcp connection
-func NewRequest(bufConn io.Reader) (*Request, error) {
+// AddressRewriter is used to rewrite a destination transparently
+type AddressRewriter interface {
+	Rewrite(ctx context.Context, request *Request) (context.Context, *AddrSpec)
+}
+
+// Server is reponsible for accepting connections and handling
+// the details of the SOCKS5 protocol
+type Server struct {
+	config      *Config
+	authMethods map[uint8]Authenticator
+}
+
+// New creates a new Server
+func New(conf *Config) *Server {
+	// Ensure we have at least one authentication method enabled
+	if len(conf.AuthMethods) == 0 {
+		if conf.Credentials != nil {
+			conf.AuthMethods = []Authenticator{&UserPassAuthenticator{conf.Credentials}}
+		} else {
+			conf.AuthMethods = []Authenticator{&NoAuthAuthenticator{}}
+		}
+	}
+
+	// Ensure we have a DNS resolver
+	if conf.Resolver == nil {
+		conf.Resolver = DNSResolver{}
+	}
+
+	// Ensure we have a dialer
+	if conf.Dial == nil {
+		conf.Dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return net.Dial(network, addr)
+		}
+	}
+
+	server := &Server{
+		config:      conf,
+		authMethods: make(map[uint8]Authenticator),
+	}
+
+	for _, a := range conf.AuthMethods {
+		server.authMethods[a.GetCode()] = a
+	}
+
+	return server
+}
+
+// ServeConn is used to serve a single connection.
+func (s *Server) ServeConn(rw io.ReadWriter) error {
+	bufReader := bufio.NewReader(rw)
+
 	// Read the version byte
-	header := []byte{0, 0, 0}
-	if _, err := io.ReadAtLeast(bufConn, header, 3); err != nil {
-		return nil, fmt.Errorf("Failed to get command version: %v", err)
+	version := []byte{0}
+	if _, err := bufReader.Read(version); err != nil {
+		return errors.Wrap(err, "[SOCKS5] failed to get version byte")
 	}
 
 	// Ensure we are compatible
-	if header[0] != socks5Version {
-		return nil, fmt.Errorf("Unsupported command version: %v", header[0])
+	if version[0] != SocksVer5 {
+		return errors.Errorf("[SOCKS5] unsupported SOCKS version[%v]", version)
+	}
+
+	// Authenticate the connection
+	authContext, err := s.authenticate(rw, bufReader)
+	if err != nil {
+		return errors.Wrap(err, "[SOCKS5] failed to authenticate")
+	}
+
+	request, err := ReadRequest(bufReader)
+	if err != nil {
+		if err == unrecognizedAddrType {
+			if err := sendReply(rw, addrTypeNotSupported, nil); err != nil {
+				return errors.Wrap(err, "[SOCKS5] failed to send reply")
+			}
+		}
+		return errors.Wrap(err, "[SOCKS5] failed to read destination address")
+	}
+	request.AuthContext = authContext
+
+	// Process the client request
+	if err := s.handleRequest(request, rw); err != nil {
+		return errors.Wrap(err, "[SOCKS5] failed to handle request")
+	}
+
+	return nil
+}
+
+// authenticate is used to handle connection authentication
+func (s *Server) authenticate(conn io.Writer, bufConn io.Reader) (*AuthContext, error) {
+	// Get the methods
+	methods, err := readMethods(bufConn)
+	if err != nil {
+		return nil, err
+	}
+
+	// Select a usable method
+	for _, method := range methods {
+		cator, found := s.authMethods[method]
+		if found {
+			return cator.Authenticate(bufConn, conn)
+		}
+	}
+
+	// No usable method found
+	return nil, noAcceptableAuth(conn)
+}
+
+// ReadRequest creates a new Request from the tcp connection
+func ReadRequest(bufConn io.Reader) (*Request, error) {
+	// Read the version byte
+	header := []byte{0, 0, 0}
+	if _, err := io.ReadAtLeast(bufConn, header, 3); err != nil {
+		return nil, errors.Wrap(err, "[SOCKS5] failed to get command version")
+	}
+
+	// Ensure we are compatible
+	if header[0] != SocksVer5 {
+		return nil, errors.Errorf("[SOCKS5] unsupported command version: %v", header[0])
 	}
 
 	// Read in the destination address
@@ -108,7 +206,7 @@ func NewRequest(bufConn io.Reader) (*Request, error) {
 	}
 
 	request := &Request{
-		Version:  socks5Version,
+		Version:  SocksVer5,
 		Command:  header[1],
 		DestAddr: dest,
 		bufConn:  bufConn,
@@ -159,23 +257,8 @@ func (s *Server) handleRequest(req *Request, conn io.Writer) error {
 
 // handleConnect is used to handle a connect command
 func (s *Server) handleConnect(ctx context.Context, conn io.Writer, req *Request) error {
-	// Check if this is allowed
-	if ctx_, ok := s.config.Rules.Allow(ctx, req); !ok {
-		if err := sendReply(conn, ruleFailure, nil); err != nil {
-			return fmt.Errorf("Failed to send reply: %v", err)
-		}
-		return fmt.Errorf("Connect to %v blocked by rules", req.DestAddr)
-	} else {
-		ctx = ctx_
-	}
-
 	// Attempt to connect
 	dial := s.config.Dial
-	if dial == nil {
-		dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return net.Dial(network, addr)
-		}
-	}
 	target, err := dial(ctx, "tcp", req.realDestAddr.Address())
 	if err != nil {
 		msg := err.Error()
@@ -230,23 +313,8 @@ func (s *Server) handleConnect(ctx context.Context, conn io.Writer, req *Request
 	return nil
 }
 
-func copyData(dst io.Writer, src io.Reader, wg *sync.WaitGroup, err error) {
-	_, err = io.Copy(dst, src)
-	wg.Done()
-}
-
 // handleBind is used to handle a connect command
 func (s *Server) handleBind(ctx context.Context, conn io.Writer, req *Request) error {
-	// Check if this is allowed
-	if ctx_, ok := s.config.Rules.Allow(ctx, req); !ok {
-		if err := sendReply(conn, ruleFailure, nil); err != nil {
-			return fmt.Errorf("Failed to send reply: %v", err)
-		}
-		return fmt.Errorf("Bind to %v blocked by rules", req.DestAddr)
-	} else {
-		ctx = ctx_
-	}
-
 	// TODO: Support bind
 	if err := sendReply(conn, commandNotSupported, nil); err != nil {
 		return fmt.Errorf("Failed to send reply: %v", err)
@@ -256,73 +324,11 @@ func (s *Server) handleBind(ctx context.Context, conn io.Writer, req *Request) e
 
 // handleAssociate is used to handle a connect command
 func (s *Server) handleAssociate(ctx context.Context, conn io.Writer, req *Request) error {
-	// Check if this is allowed
-	if ctx_, ok := s.config.Rules.Allow(ctx, req); !ok {
-		if err := sendReply(conn, ruleFailure, nil); err != nil {
-			return fmt.Errorf("Failed to send reply: %v", err)
-		}
-		return fmt.Errorf("Associate to %v blocked by rules", req.DestAddr)
-	} else {
-		ctx = ctx_
-	}
-
 	// TODO: Support associate
 	if err := sendReply(conn, commandNotSupported, nil); err != nil {
 		return fmt.Errorf("Failed to send reply: %v", err)
 	}
 	return nil
-}
-
-// readAddrSpec is used to read AddrSpec.
-// Expects an address type byte, follwed by the address and port
-func readAddrSpec(r io.Reader) (*AddrSpec, error) {
-	d := &AddrSpec{}
-
-	// Get the address type
-	addrType := []byte{0}
-	if _, err := r.Read(addrType); err != nil {
-		return nil, err
-	}
-
-	// Handle on a per type basis
-	switch addrType[0] {
-	case ipv4Address:
-		addr := make([]byte, 4)
-		if _, err := io.ReadAtLeast(r, addr, len(addr)); err != nil {
-			return nil, err
-		}
-		d.IP = net.IP(addr)
-
-	case ipv6Address:
-		addr := make([]byte, 16)
-		if _, err := io.ReadAtLeast(r, addr, len(addr)); err != nil {
-			return nil, err
-		}
-		d.IP = net.IP(addr)
-
-	case fqdnAddress:
-		if _, err := r.Read(addrType); err != nil {
-			return nil, err
-		}
-		addrLen := int(addrType[0])
-		fqdn := make([]byte, addrLen)
-		if _, err := io.ReadAtLeast(r, fqdn, addrLen); err != nil {
-			return nil, err
-		}
-		d.FQDN = string(fqdn)
-
-	default:
-		return nil, unrecognizedAddrType
-	}
-
-	// Read the port
-	port := []byte{0, 0}
-	if _, err := io.ReadAtLeast(r, port, 2); err != nil {
-		return nil, err
-	}
-	d.Port = (int(port[0]) << 8) | int(port[1])
-
-	return d, nil
 }
 
 // sendReply is used to send a reply message
@@ -358,7 +364,7 @@ func sendReply(w io.Writer, resp uint8, addr *AddrSpec) error {
 
 	// Format the message
 	msg := make([]byte, 6+len(addrBody))
-	msg[0] = socks5Version
+	msg[0] = SocksVer5
 	msg[1] = resp
 	msg[2] = 0 // Reserved
 	msg[3] = addrType
