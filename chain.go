@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 const DialTimeout = 1 * time.Second
 
 type ChainNode interface {
+	String() string
 	// URL return the url.URL of current node
 	URL() *url.URL
 	// Connect only used for first node of the chain
@@ -57,6 +59,14 @@ func NewProxyChain(urls ...string) (*ProxyChain, error) {
 		chain.Nodes = append(chain.Nodes, cn)
 	}
 	return chain, nil
+}
+
+func (pc ProxyChain) String() string {
+	var nodes []string
+	for _, n := range pc.Nodes {
+		nodes = append(nodes, n.String())
+	}
+	return fmt.Sprintf("[%s]", strings.Join(nodes, ","))
 }
 
 func (pc *ProxyChain) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -114,6 +124,10 @@ func NewHttpChainNode(n *Node) *HttpChainNode {
 	return &HttpChainNode{
 		Node: n,
 	}
+}
+
+func (n HttpChainNode) String() string {
+	return n.Node.String()
 }
 
 func (n *HttpChainNode) URL() *url.URL {
@@ -190,6 +204,10 @@ func NewSocks5ChainNode(n *Node) *Socks5ChainNode {
 	return &Socks5ChainNode{
 		Node: n,
 	}
+}
+
+func (n Socks5ChainNode) String() string {
+	return n.Node.String()
 }
 
 func (n *Socks5ChainNode) URL() *url.URL {

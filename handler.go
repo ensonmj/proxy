@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/url"
 
@@ -9,6 +10,10 @@ import (
 	"github.com/ensonmj/proxy/httpproxy"
 	"github.com/ensonmj/proxy/socks5"
 )
+
+type Handler interface {
+	ServeConn(io.ReadWriter) error
+}
 
 func NewHttpHandler(
 	user *url.Userinfo,

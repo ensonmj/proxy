@@ -10,14 +10,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const (
-	socks5Version = 5
-)
-
-type Handler interface {
-	ServeConn(io.ReadWriter) error
-}
-
 // **********************************************************************************
 //                                ______________________________
 //                               |                              |
