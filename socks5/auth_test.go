@@ -3,6 +3,8 @@ package socks5
 import (
 	"bytes"
 	"testing"
+
+	"github.com/ensonmj/proxy/cred"
 )
 
 func TestNoAuth(t *testing.T) {
@@ -32,7 +34,7 @@ func TestPasswordAuth_Valid(t *testing.T) {
 	req.Write([]byte{1, 3, 'f', 'o', 'o', 3, 'b', 'a', 'r'})
 	var resp bytes.Buffer
 
-	cred := StaticCredentials{
+	cred := cred.StaticCredentials{
 		"foo": "bar",
 	}
 
@@ -70,7 +72,7 @@ func TestPasswordAuth_Invalid(t *testing.T) {
 	req.Write([]byte{1, 3, 'f', 'o', 'o', 3, 'b', 'a', 'z'})
 	var resp bytes.Buffer
 
-	cred := StaticCredentials{
+	cred := cred.StaticCredentials{
 		"foo": "bar",
 	}
 	cator := UserPassAuthenticator{Credentials: cred}
@@ -96,7 +98,7 @@ func TestNoSupportedAuth(t *testing.T) {
 	req.Write([]byte{1, MethodNoAuth})
 	var resp bytes.Buffer
 
-	cred := StaticCredentials{
+	cred := cred.StaticCredentials{
 		"foo": "bar",
 	}
 	cator := UserPassAuthenticator{Credentials: cred}

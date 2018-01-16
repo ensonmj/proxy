@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ensonmj/proxy/cred"
+	"github.com/ensonmj/proxy/util"
 	"github.com/pkg/errors"
 )
 
@@ -283,34 +284,7 @@ func (s *Server) handleConnect(ctx context.Context, conn io.Writer, req *Request
 	}
 
 	// Start proxying
-	srcToDstC := make(chan error)
-	dstToSrcC := make(chan error)
-	go func() {
-		_, err := io.Copy(target, req.bufConn)
-		srcToDstC <- err
-	}()
-	go func() {
-		_, err := io.Copy(conn, target)
-		dstToSrcC <- err
-	}()
-
-	var srcToDstErr, dstToSrcErr error
-	for {
-		select {
-		case srcToDstErr = <-srcToDstC:
-			srcToDstC = nil
-		case dstToSrcErr = <-dstToSrcC:
-			dstToSrcC = nil
-		}
-		if srcToDstC == nil && dstToSrcC == nil {
-			break
-		}
-	}
-	if srcToDstErr != nil || dstToSrcC != nil {
-		return errors.Errorf("[socks] connIO err[%s <=> %s]", dstToSrcErr, srcToDstErr)
-	}
-
-	return nil
+	return util.ConnIO(target, conn, req.bufConn)
 }
 
 // handleBind is used to handle a connect command

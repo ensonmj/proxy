@@ -8,6 +8,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/ensonmj/proxy/cred"
 )
 
 type MockConn struct {
@@ -124,7 +126,7 @@ func TestSOCKS5_Connect(t *testing.T) {
 	lAddr := l.Addr().(*net.TCPAddr)
 
 	// Create a socks server
-	creds := StaticCredentials{
+	creds := cred.StaticCredentials{
 		"foo": "bar",
 	}
 	cator := UserPassAuthenticator{Credentials: creds}

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/ensonmj/proxy/cred"
+	"github.com/ensonmj/proxy/util"
 	"github.com/pkg/errors"
 )
 
@@ -28,8 +29,7 @@ type Config struct {
 // Server is reponsible for accepting connections and handling
 // the details of the SOCKS5 protocol
 type Server struct {
-	config *Config
-	// authMethods map[uint8]Authenticator
+	config  *Config
 	hasPort *regexp.Regexp
 	client  http.Client
 }
@@ -96,7 +96,7 @@ func (h *Server) ServeConn(rw io.ReadWriter) error {
 		httpResp(rw, req, 200, "")
 		// log.WithField("server", host).Debug("[http] success connect to server")
 
-		return connIO(targetConn, rw)
+		return util.ConnIO(targetConn, rw, bufReader)
 	}
 
 	for {
@@ -192,35 +192,4 @@ func removeProxyHeaders(req *http.Request) {
 	//   options that are desired for that particular connection and MUST NOT
 	//   be communicated by proxies over further connections.
 	req.Header.Del("Connection")
-}
-
-func connIO(dst, src io.ReadWriter) error {
-	srcToDstC := make(chan error)
-	dstToSrcC := make(chan error)
-	go func() {
-		_, err := io.Copy(dst, src)
-		srcToDstC <- err
-	}()
-	go func() {
-		_, err := io.Copy(src, dst)
-		dstToSrcC <- err
-	}()
-
-	var srcToDstErr, dstToSrcErr error
-	for {
-		select {
-		case srcToDstErr = <-srcToDstC:
-			srcToDstC = nil
-		case dstToSrcErr = <-dstToSrcC:
-			dstToSrcC = nil
-		}
-		if srcToDstC == nil && dstToSrcC == nil {
-			break
-		}
-	}
-	if srcToDstErr != nil || dstToSrcC != nil {
-		return errors.Errorf("[http] connIO err[%s <=> %s]", dstToSrcErr, srcToDstErr)
-	}
-
-	return nil
 }
