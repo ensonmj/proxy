@@ -47,7 +47,7 @@ func NewProxyChain(urls ...string) (*ProxyChain, error) {
 		}
 		var cn ChainNode
 		switch n.URL.Scheme {
-		case "http":
+		case "http", "ghost":
 			cn = NewHttpChainNode(n)
 		case "socks5":
 			cn = NewSocks5ChainNode(n)
