@@ -64,14 +64,8 @@ func (h *Server) ServeConn(rw io.ReadWriter) error {
 
 	// need auth
 	if h.config.Credentials != nil {
-		// 	log.WithField("node", h.node).Debug("[http] need auth")
 		reqUser, reqPass, ok := getBasicAuth(req)
 		if !ok {
-			// log.WithFields(logrus.Fields{
-			// 	"username": reqUser,
-			// 	"password": reqPass,
-			// 	"ok":       ok,
-			// }).Warn("[http] auth failed")
 			return errors.New("[http] auth failed")
 		}
 
@@ -94,7 +88,6 @@ func (h *Server) ServeConn(rw io.ReadWriter) error {
 		defer targetConn.Close()
 
 		httpResp(rw, req, 200, "")
-		// log.WithField("server", host).Debug("[http] success connect to server")
 
 		return util.ConnIO(targetConn, rw, bufReader)
 	}
@@ -145,11 +138,6 @@ func getBasicAuth(req *http.Request) (username, password string, ok bool) {
 }
 
 func httpResp(w io.Writer, req *http.Request, code int, body string) {
-	// log.WithFields(logrus.Fields{
-	// 	"status": code,
-	// 	"body":   body,
-	// }).Debug("[http] send response")
-
 	resp := &http.Response{
 		Request:       req,
 		StatusCode:    code,

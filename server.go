@@ -132,12 +132,15 @@ func handleConn(node *Node, conn net.Conn,
 			case httpErr = <-httpErrC:
 				httpErrC = nil
 			}
+			if sockErrC == nil && httpErrC == nil {
+				break
+			}
 		}
 		if sockErr != nil && httpErr != nil {
 			log.WithFields(logrus.Fields{
 				"http":  httpErr,
 				"socks": sockErr,
-			}).Error("http and socks5 all failed")
+			}).Warn("http and socks5 all failed")
 		}
 	}
 }

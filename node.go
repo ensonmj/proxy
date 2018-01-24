@@ -17,7 +17,7 @@ type Node struct {
 }
 
 func (n Node) String() string {
-	return fmt.Sprintf("<Addr:%s, Hooks:%v, RT:%d, WT:%d>",
+	return fmt.Sprintf(`{Addr:"%s", Hooks:%v, RT:%d, WT:%d}`,
 		n.URL.String(), n.hooks, n.ReadTimeout, n.WriteTimeout)
 }
 

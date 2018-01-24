@@ -181,11 +181,12 @@ func (n *HttpChainNode) ForwardRequest(c net.Conn, uri *url.URL) error {
 		return errors.Wrap(err, "forward request read response")
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp, err := ioutil.ReadAll(resp.Body)
+		res, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
 			return errors.Wrap(err, "forward request clear body")
 		}
-		return errors.New("proxy refused connection: " + string(resp))
+		return errors.New(fmt.Sprintf("get response[%s] from node %s",
+			string(res), n))
 	}
 
 	return nil
