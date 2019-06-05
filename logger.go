@@ -6,7 +6,7 @@ var (
 	log = logrus.New()
 )
 
-func SetLevel(lvl uint32) {
+func SetLevel(lvl int) {
 	log.SetLevel(logrus.Level(lvl))
 }
 
