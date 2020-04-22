@@ -57,8 +57,6 @@ func Handshake(rw io.ReadWriter, username, password string) error {
 	default:
 		return ErrBadMethod
 	}
-
-	return nil
 }
 
 /*
@@ -113,7 +111,7 @@ func sendUserPass(rw io.ReadWriter, username, password string) error {
     | 1  |  1  | X'00' |  1   | Variable |    2     |
     +----+-----+-------+------+----------+----------+
 */
-func SendRequest(rw io.ReadWriter, cmd uint8, host string, port uint16) error {
+func SendRequest(w io.Writer, cmd uint8, host string, port uint16) error {
 	b := sPool.Get().([]byte)
 	defer sPool.Put(b)
 
@@ -125,7 +123,7 @@ func SendRequest(rw io.ReadWriter, cmd uint8, host string, port uint16) error {
 	n, _ := addr.Encode(b[3:])
 	length := 3 + n
 
-	_, err := rw.Write(b[:length])
+	_, err := w.Write(b[:length])
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -159,7 +157,12 @@ func ReadReply(r io.Reader) (*Reply, error) {
 	}
 
 	if b[1] != Succeeded {
-		return nil, errors.New("proxy refused connection")
+		switch b[1] {
+		case Succeeded, Failure, NotAllowed, NetUnreachable, HostUnreachable, ConnRefused, TTLExpired, CmdUnsupported, AddrUnsupported:
+			return nil, errors.Errorf("proxy error code[%02X]", b[1])
+		default:
+			return nil, errors.Errorf("unknown proxy error code[%02X]", b[1])
+		}
 	}
 
 	length := 0

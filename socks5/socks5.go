@@ -27,9 +27,11 @@ const (
 
 // CMD
 const (
-	CmdConnect uint8 = 1
-	CmdBind          = 2
-	CmdUdp           = 3
+	CmdConnect uint8 = iota + 1
+	CmdBind
+	CmdAssociate // for udp
+	CmdListen    // expand for reverse proxy
+	CmdRevConn   // expand for reverse proxy
 )
 
 // ATYP

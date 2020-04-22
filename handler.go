@@ -46,3 +46,13 @@ func NewSocksHandler(
 	}
 	return socks5.New(cfg)
 }
+
+func NewRevSocksHandler(
+	user *url.Userinfo,
+	dialCtx func(context.Context, string, string) (net.Conn, error)) *socks5.Server {
+	cfg := &socks5.Config{
+		Dial: dialCtx,
+	}
+	// reverse proxy not support authentication
+	return socks5.New(cfg)
+}

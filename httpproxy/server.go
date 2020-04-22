@@ -37,7 +37,7 @@ type Server struct {
 func New(conf *Config) *Server {
 	// Ensure we have a dialer
 	if conf.Dial == nil {
-		conf.Dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conf.Dial = func(_ context.Context, network, addr string) (net.Conn, error) {
 			return net.Dial(network, addr)
 		}
 	}

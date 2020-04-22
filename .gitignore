@@ -17,3 +17,4 @@
 *.swo
 
 proxyd
+.DS_Store

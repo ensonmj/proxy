@@ -156,3 +156,20 @@ func (c *wrapper) Read(b []byte) (n int, err error) {
 func (c *wrapper) Write(b []byte) (n int, err error) {
 	return c.Writer.Write(b)
 }
+
+func (s *Server) RevServe() error {
+	cNode := s.Node
+	user := cNode.URL.User
+	switch cNode.URL.Scheme {
+	case "socks5":
+		err := NewRevSocksHandler(user, s.DialCtx).RevServeConn(cNode.URL)
+		if err != nil {
+			log.WithError(err).Warn("socks5 proxy failed")
+		}
+		return err
+	case "http", "ghost":
+		fallthrough
+	default:
+		return errors.New("reverse proxy not support protocol other than socks5")
+	}
+}

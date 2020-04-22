@@ -9,7 +9,7 @@ import (
 )
 
 /*
-Address
+Addr struct
  +------+----------+----------+
  | ATYP |   ADDR   |   PORT   |
  +------+----------+----------+
@@ -22,6 +22,7 @@ type Addr struct {
 	Port uint16
 }
 
+// NewAddr create Addr struct from host and port
 func NewAddr(host string, port uint16) *Addr {
 	var typ uint8
 	if ip := net.ParseIP(host); ip == nil {
@@ -41,6 +42,7 @@ func NewAddr(host string, port uint16) *Addr {
 	}
 }
 
+// Decode decode host and port from bytes
 func (addr *Addr) Decode(b []byte) error {
 	addr.Type = b[0]
 	pos := 1
@@ -65,6 +67,7 @@ func (addr *Addr) Decode(b []byte) error {
 	return nil
 }
 
+// Encode fill buf with host and port
 func (addr *Addr) Encode(b []byte) (int, error) {
 	b[0] = addr.Type
 	pos := 1
@@ -138,6 +141,15 @@ func (a AddrSpec) Address() string {
 	return net.JoinHostPort(a.FQDN, strconv.Itoa(a.Port))
 }
 
+// Address returns a string suitable to dial; prefer returning IP-based
+// address, fallback to FQDN
+func (a AddrSpec) Hostname() string {
+	if 0 != len(a.IP) {
+		return a.IP.String()
+	}
+	return a.FQDN
+}
+
 // readAddrSpec is used to read AddrSpec.
 // Expects an address type byte, follwed by the address and port
 func readAddrSpec(r io.Reader) (*AddrSpec, error) {
@@ -151,21 +163,21 @@ func readAddrSpec(r io.Reader) (*AddrSpec, error) {
 
 	// Handle on a per type basis
 	switch addrType[0] {
-	case ipv4Address:
+	case AddrIPv4:
 		addr := make([]byte, 4)
 		if _, err := io.ReadAtLeast(r, addr, len(addr)); err != nil {
 			return nil, err
 		}
 		d.IP = net.IP(addr)
 
-	case ipv6Address:
+	case AddrIPv6:
 		addr := make([]byte, 16)
 		if _, err := io.ReadAtLeast(r, addr, len(addr)); err != nil {
 			return nil, err
 		}
 		d.IP = net.IP(addr)
 
-	case fqdnAddress:
+	case AddrDomain:
 		if _, err := r.Read(addrType); err != nil {
 			return nil, err
 		}
@@ -177,7 +189,7 @@ func readAddrSpec(r io.Reader) (*AddrSpec, error) {
 		d.FQDN = string(fqdn)
 
 	default:
-		return nil, unrecognizedAddrType
+		return nil, ErrBadAddrType
 	}
 
 	// Read the port

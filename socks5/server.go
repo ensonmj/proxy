@@ -6,36 +6,19 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/ensonmj/proxy/cred"
 	"github.com/ensonmj/proxy/util"
 	"github.com/pkg/errors"
 )
 
-const (
-	ConnectCommand   = uint8(1)
-	BindCommand      = uint8(2)
-	AssociateCommand = uint8(3)
-	ipv4Address      = uint8(1)
-	fqdnAddress      = uint8(3)
-	ipv6Address      = uint8(4)
-)
-
-const (
-	successReply uint8 = iota
-	serverFailure
-	ruleFailure
-	networkUnreachable
-	hostUnreachable
-	connectionRefused
-	ttlExpired
-	commandNotSupported
-	addrTypeNotSupported
-)
-
 var (
-	unrecognizedAddrType = fmt.Errorf("Unrecognized address type")
+	gRevConnLocker sync.Mutex
+	gRevConns      []net.Conn
 )
 
 // A Request represents request received by a server
@@ -150,8 +133,8 @@ func (s *Server) ServeConn(rw io.ReadWriter) error {
 
 	request, err := ReadRequest(bufReader)
 	if err != nil {
-		if err == unrecognizedAddrType {
-			if err := sendReply(rw, addrTypeNotSupported, nil); err != nil {
+		if err == ErrBadAddrType {
+			if err := sendReply(rw, AddrUnsupported, nil); err != nil {
 				return errors.Wrap(err, "[SOCKS5] failed to send reply")
 			}
 		}
@@ -192,12 +175,12 @@ func ReadRequest(bufConn io.Reader) (*Request, error) {
 	// Read the version byte
 	header := []byte{0, 0, 0}
 	if _, err := io.ReadAtLeast(bufConn, header, 3); err != nil {
-		return nil, errors.Wrap(err, "[SOCKS5] failed to get command version")
+		return nil, ErrBadFormat
 	}
 
 	// Ensure we are compatible
 	if header[0] != SocksVer5 {
-		return nil, errors.Errorf("[SOCKS5] unsupported command version: %v", header[0])
+		return nil, ErrBadVersion
 	}
 
 	// Read in the destination address
@@ -220,36 +203,40 @@ func ReadRequest(bufConn io.Reader) (*Request, error) {
 func (s *Server) handleRequest(req *Request, conn io.Writer) error {
 	ctx := context.Background()
 
-	// Resolve the address if we have a FQDN
-	dest := req.DestAddr
-	if dest.FQDN != "" {
-		ctx_, addr, err := s.config.Resolver.Resolve(ctx, dest.FQDN)
-		if err != nil {
-			if err := sendReply(conn, hostUnreachable, nil); err != nil {
-				return fmt.Errorf("Failed to send reply: %v", err)
-			}
-			return fmt.Errorf("Failed to resolve destination '%v': %v", dest.FQDN, err)
-		}
-		ctx = ctx_
-		dest.IP = addr
-	}
-
 	// Apply any address rewrites
 	req.realDestAddr = req.DestAddr
 	if s.config.Rewriter != nil {
 		ctx, req.realDestAddr = s.config.Rewriter.Rewrite(ctx, req)
 	}
 
+	// Resolve the address if we have a FQDN
+	dest := req.realDestAddr
+	if dest.FQDN != "" {
+		newCtx, addr, err := s.config.Resolver.Resolve(ctx, dest.FQDN)
+		if err != nil {
+			if err := sendReply(conn, HostUnreachable, nil); err != nil {
+				return fmt.Errorf("Failed to send reply: %v", err)
+			}
+			return fmt.Errorf("Failed to resolve destination '%v': %v", dest.FQDN, err)
+		}
+		ctx = newCtx
+		req.realDestAddr.IP = addr
+	}
+
 	// Switch on the command
 	switch req.Command {
-	case ConnectCommand:
+	case CmdConnect:
 		return s.handleConnect(ctx, conn, req)
-	case BindCommand:
+	case CmdBind:
 		return s.handleBind(ctx, conn, req)
-	case AssociateCommand:
+	case CmdAssociate:
 		return s.handleAssociate(ctx, conn, req)
+	case CmdListen:
+		return s.handleListen(ctx, conn, req)
+	case CmdRevConn:
+		return s.handleRevConn(ctx, conn, req)
 	default:
-		if err := sendReply(conn, commandNotSupported, nil); err != nil {
+		if err := sendReply(conn, CmdUnsupported, nil); err != nil {
 			return fmt.Errorf("Failed to send reply: %v", err)
 		}
 		return fmt.Errorf("Unsupported command: %v", req.Command)
@@ -262,13 +249,7 @@ func (s *Server) handleConnect(ctx context.Context, conn io.Writer, req *Request
 	dial := s.config.Dial
 	target, err := dial(ctx, "tcp", req.realDestAddr.Address())
 	if err != nil {
-		msg := err.Error()
-		resp := hostUnreachable
-		if strings.Contains(msg, "refused") {
-			resp = connectionRefused
-		} else if strings.Contains(msg, "network is unreachable") {
-			resp = networkUnreachable
-		}
+		resp := netErr2SockErr(err)
 		if err := sendReply(conn, resp, nil); err != nil {
 			return fmt.Errorf("Failed to send reply: %v", err)
 		}
@@ -279,7 +260,7 @@ func (s *Server) handleConnect(ctx context.Context, conn io.Writer, req *Request
 	// Send success
 	local := target.LocalAddr().(*net.TCPAddr)
 	bind := AddrSpec{IP: local.IP, Port: local.Port}
-	if err := sendReply(conn, successReply, &bind); err != nil {
+	if err := sendReply(conn, Succeeded, &bind); err != nil {
 		return fmt.Errorf("Failed to send reply: %v", err)
 	}
 
@@ -287,22 +268,221 @@ func (s *Server) handleConnect(ctx context.Context, conn io.Writer, req *Request
 	return util.ConnIO(target, conn, req.bufConn)
 }
 
-// handleBind is used to handle a connect command
+// handleBind is used to handle a bind command
 func (s *Server) handleBind(ctx context.Context, conn io.Writer, req *Request) error {
 	// TODO: Support bind
-	if err := sendReply(conn, commandNotSupported, nil); err != nil {
+	if err := sendReply(conn, CmdUnsupported, nil); err != nil {
 		return fmt.Errorf("Failed to send reply: %v", err)
 	}
 	return nil
 }
 
-// handleAssociate is used to handle a connect command
+// handleAssociate is used to handle a associate command
 func (s *Server) handleAssociate(ctx context.Context, conn io.Writer, req *Request) error {
 	// TODO: Support associate
-	if err := sendReply(conn, commandNotSupported, nil); err != nil {
+	if err := sendReply(conn, CmdUnsupported, nil); err != nil {
 		return fmt.Errorf("Failed to send reply: %v", err)
 	}
 	return nil
+}
+
+// handleListen is used to handle a listen command in client end proxy
+func (s *Server) handleListen(ctx context.Context, conn io.Writer, req *Request) error {
+	ln, err := net.Listen("tcp", req.realDestAddr.Address())
+	if err != nil {
+		if err := sendReply(conn, Failure, nil); err != nil {
+			return fmt.Errorf("Failed to send reply: %v", err)
+		}
+		return errors.WithStack(err)
+	}
+	defer ln.Close()
+
+	// Send success
+	if err := sendReply(conn, Succeeded, req.DestAddr); err != nil {
+		return fmt.Errorf("Failed to send reply: %v", err)
+	}
+
+	for {
+		client, err := ln.Accept()
+		if err != nil {
+			return err
+		}
+
+		bufReader := bufio.NewReader(client)
+
+		// Read the version byte
+		version := []byte{0}
+		if _, err := bufReader.Read(version); err != nil {
+			return errors.Wrap(err, "[SOCKS5] failed to get version byte")
+		}
+
+		// Ensure we are compatible
+		if version[0] != SocksVer5 {
+			return errors.Errorf("[SOCKS5] unsupported SOCKS version[%v]", version)
+		}
+
+		// Authenticate the connection
+		authContext, err := s.authenticate(client, bufReader)
+		if err != nil {
+			return errors.Wrap(err, "[SOCKS5] failed to authenticate")
+		}
+
+		request, err := ReadRequest(bufReader)
+		if err != nil {
+			if err == ErrBadAddrType {
+				if err := sendReply(client, AddrUnsupported, nil); err != nil {
+					return errors.Wrap(err, "[SOCKS5] failed to send reply")
+				}
+			}
+			return errors.Wrap(err, "[SOCKS5] failed to read destination address")
+		}
+		request.AuthContext = authContext
+
+		// request to build reverse connection
+		host := request.DestAddr.Hostname()
+		p := request.DestAddr.Port
+		if err := SendRequest(conn, CmdConnect, host, uint16(p)); err != nil {
+			return errors.WithStack(err)
+		}
+
+		// TODO: make sure multi connections keep order?
+		gRevConnLocker.Lock()
+		gRevConns = append(gRevConns, client)
+		gRevConnLocker.Unlock()
+	}
+}
+
+// handleListen is used to handle a listen command in client end proxy
+func (s *Server) handleRevConn(ctx context.Context, conn io.Writer, req *Request) error {
+	// TODO: make sure multi connections keep order?
+	gRevConnLocker.Lock()
+	client := gRevConns[0]
+	gRevConns = gRevConns[1:]
+	gRevConnLocker.Unlock()
+
+	// Send success
+	local := client.LocalAddr().(*net.TCPAddr)
+	bind := AddrSpec{IP: local.IP, Port: local.Port}
+	if err := sendReply(conn, Succeeded, &bind); err != nil {
+		return fmt.Errorf("Failed to send reply: %v", err)
+	}
+
+	// local := client.LocalAddr().(*net.TCPAddr)
+	// bind := AddrSpec{IP: local.IP, Port: local.Port}
+	if err := sendReply(client, Succeeded, &bind); err != nil {
+		return fmt.Errorf("Failed to send reply: %v", err)
+	}
+
+	return util.ConnIO(client, conn, req.bufConn)
+}
+
+// RevServeConn is used to dispatch reverse connection.
+func (s *Server) RevServeConn(url url.URL) error {
+	ctx := context.Background()
+
+	// connect to client end proxy
+	ctrlConn, err := s.config.Dial(ctx, "", "")
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	// handshake with client end proxy without auth
+	Handshake(ctrlConn, "", "")
+	// send CmdListen to client end proxy
+	host := url.Hostname()
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	p, err := strconv.Atoi(url.Port())
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	if err := SendRequest(ctrlConn, CmdListen, host, uint16(p)); err != nil {
+		return errors.WithStack(err)
+	}
+	// receive CmdListen reply
+	if _, err := ReadReply(ctrlConn); err != nil {
+		return errors.WithStack(err)
+	}
+
+	for {
+		// receive reverse proxy request
+		bufReader := bufio.NewReader(ctrlConn)
+		req, err := ReadRequest(bufReader)
+		if err != nil {
+			if err == ErrBadAddrType {
+				if err := sendReply(ctrlConn, AddrUnsupported, nil); err != nil {
+					return errors.Wrap(err, "[SOCKS5] failed to send reply")
+				}
+			}
+			return errors.Wrap(err, "[SOCKS5] failed to read destination address")
+		}
+
+		// Apply any address rewrites
+		req.realDestAddr = req.DestAddr
+		if s.config.Rewriter != nil {
+			ctx, req.realDestAddr = s.config.Rewriter.Rewrite(ctx, req)
+		}
+
+		// Resolve the address if we have a FQDN
+		dest := req.realDestAddr
+		if dest.FQDN != "" {
+			newCtx, addr, err := s.config.Resolver.Resolve(ctx, dest.FQDN)
+			if err != nil {
+				if err := sendReply(ctrlConn, HostUnreachable, nil); err != nil {
+					return fmt.Errorf("Failed to send reply: %v", err)
+				}
+				return fmt.Errorf("Failed to resolve destination '%v': %v", dest.FQDN, err)
+			}
+			ctx = newCtx
+			req.realDestAddr.IP = addr
+		}
+
+		// Switch on the command
+		switch req.Command {
+		case CmdConnect:
+			// dial target
+			target, err := net.Dial("tcp", req.realDestAddr.Address())
+			if err != nil {
+				resp := netErr2SockErr(err)
+				if err := sendReply(ctrlConn, resp, nil); err != nil {
+					return fmt.Errorf("Failed to send reply: %v", err)
+				}
+				return fmt.Errorf("Connect to %v failed: %v", req.DestAddr, err)
+			}
+			defer target.Close()
+
+			// Send success
+			local := target.LocalAddr().(*net.TCPAddr)
+			bind := AddrSpec{IP: local.IP, Port: local.Port}
+			if err := sendReply(ctrlConn, Succeeded, &bind); err != nil {
+				return fmt.Errorf("Failed to send reply: %v", err)
+			}
+
+			// dial client
+			dataConn, err := s.config.Dial(ctx, "", "")
+			if err != nil {
+				return errors.WithStack(err)
+			}
+			Handshake(dataConn, "", "")
+
+			if err := SendRequest(dataConn, CmdRevConn, req.DestAddr.Hostname(), uint16(req.DestAddr.Port)); err != nil {
+				return errors.WithStack(err)
+			}
+
+			// receive CmdListen reply
+			if _, err := ReadReply(dataConn); err != nil {
+				return errors.WithStack(err)
+			}
+
+			// Start proxying
+			go util.ConnIO(target, dataConn, dataConn)
+		default:
+			if err := sendReply(ctrlConn, CmdUnsupported, nil); err != nil {
+				return fmt.Errorf("Failed to send reply: %v", err)
+			}
+			return fmt.Errorf("Unsupported command: %v", req.Command)
+		}
+	}
 }
 
 // sendReply is used to send a reply message
@@ -313,22 +493,22 @@ func sendReply(w io.Writer, resp uint8, addr *AddrSpec) error {
 	var addrPort uint16
 	switch {
 	case addr == nil:
-		addrType = ipv4Address
+		addrType = AddrIPv4
 		addrBody = []byte{0, 0, 0, 0}
 		addrPort = 0
 
 	case addr.FQDN != "":
-		addrType = fqdnAddress
+		addrType = AddrDomain
 		addrBody = append([]byte{byte(len(addr.FQDN))}, addr.FQDN...)
 		addrPort = uint16(addr.Port)
 
 	case addr.IP.To4() != nil:
-		addrType = ipv4Address
+		addrType = AddrIPv4
 		addrBody = []byte(addr.IP.To4())
 		addrPort = uint16(addr.Port)
 
 	case addr.IP.To16() != nil:
-		addrType = ipv6Address
+		addrType = AddrIPv6
 		addrBody = []byte(addr.IP.To16())
 		addrPort = uint16(addr.Port)
 
@@ -349,4 +529,15 @@ func sendReply(w io.Writer, resp uint8, addr *AddrSpec) error {
 	// Send the message
 	_, err := w.Write(msg)
 	return err
+}
+
+func netErr2SockErr(err error) uint8 {
+	msg := err.Error()
+	resp := HostUnreachable
+	if strings.Contains(msg, "refused") {
+		resp = ConnRefused
+	} else if strings.Contains(msg, "network is unreachable") {
+		resp = NetUnreachable
+	}
+	return resp
 }

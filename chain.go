@@ -75,6 +75,13 @@ func (pc *ProxyChain) DialContext(ctx context.Context, network, addr string) (ne
 		"target":  addr,
 		"chain":   pc,
 	}).Debug("connecting to target with chain")
+
+	// just connect all chain nodes
+	if addr == "" {
+		return pc.ChainConnect(ctx, "", "")
+	}
+
+	// connect all chain and the target
 	if len(pc.Nodes) == 0 {
 		return net.DialTimeout(network, addr, DialTimeout)
 	}
@@ -108,6 +115,42 @@ func (pc *ProxyChain) DialContext(ctx context.Context, network, addr string) (ne
 				return nil, errors.WithStack(err)
 			}
 		}
+		if err := n.ForwardRequest(conn, url); err != nil {
+			return nil, err
+		}
+	}
+
+	return conn, nil
+}
+
+func (pc *ProxyChain) ChainConnect(ctx context.Context, _, _ string) (net.Conn, error) {
+	log.WithFields(logrus.Fields{
+		"chain": pc,
+	}).Debug("chain connecting")
+	if len(pc.Nodes) == 0 {
+		return nil, errors.New("empty chain")
+	}
+
+	headNode := pc.Nodes[0]
+	conn, err := headNode.Connect()
+	if err != nil {
+		return nil, err
+	}
+
+	num := len(pc.Nodes)
+	if num == 1 {
+		return conn, nil
+	}
+
+	for i, n := range pc.Nodes[:num-2] {
+		//regitster hook
+		conn = n.RegisterHook(conn)
+
+		// handshake with current hop
+		n.Handshake(conn)
+
+		// next chain hop
+		url := pc.Nodes[i+1].URL()
 		if err := n.ForwardRequest(conn, url); err != nil {
 			return nil, err
 		}
