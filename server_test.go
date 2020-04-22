@@ -65,12 +65,26 @@ func setupProxyServer(t *testing.T,
 		t.Fatal(err)
 	}
 	replaceNodeHost(n, ln.Addr().String())
+
+	var h Handler
+	user := n.URL.User
+	switch n.URL.Scheme {
+	case "http":
+		h = NewHttpHandler(user, dialCtx)
+	case "socks5":
+		h = NewSocksHandler(user, dialCtx)
+	case "ghost":
+		fallthrough
+	default:
+		h = NewAutoHandler(user, dialCtx)
+	}
+
 	go func() {
 		conn, err := ln.Accept()
 		if err != nil {
 			t.Fatal(err)
 		}
-		handleConn(n, conn, dialCtx)
+		handleConn(conn, n, h)
 	}()
 
 	t.Logf("proxy server listen at %s", ln.Addr().String())
