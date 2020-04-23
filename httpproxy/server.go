@@ -55,8 +55,10 @@ func New(conf *Config) *Server {
 	return server
 }
 
-func (h *Server) ServeConn(rw io.ReadWriter) error {
-	bufReader := bufio.NewReader(rw)
+func (h *Server) ServeConn(conn net.Conn) error {
+	defer conn.Close()
+
+	bufReader := bufio.NewReader(conn)
 	req, err := http.ReadRequest(bufReader)
 	if err != nil {
 		return errors.WithStack(err)
@@ -82,29 +84,29 @@ func (h *Server) ServeConn(rw io.ReadWriter) error {
 		}
 		targetConn, err := h.config.Dial(req.Context(), "tcp", host)
 		if err != nil {
-			httpResp(rw, req, 500, err.Error())
+			httpResp(conn, req, 500, err.Error())
 			return errors.WithStack(err)
 		}
 		defer targetConn.Close()
 
-		httpResp(rw, req, 200, "")
+		httpResp(conn, req, 200, "")
 
-		return util.ConnIO(targetConn, rw, bufReader)
+		return util.ConnIO(targetConn, conn, bufReader)
 	}
 
 	for {
 		if !req.URL.IsAbs() {
-			httpResp(rw, req, 500, "[http] proxy requset url is not absolute")
+			httpResp(conn, req, 500, "[http] proxy requset url is not absolute")
 			return errors.New("[http] proxy requset url is not absolute")
 		}
 		removeProxyHeaders(req)
 
 		resp, err := h.client.Do(req)
 		if err != nil {
-			httpResp(rw, req, 500, err.Error())
+			httpResp(conn, req, 500, err.Error())
 			return errors.WithStack(err)
 		}
-		resp.Write(rw)
+		resp.Write(conn)
 
 		req, err = http.ReadRequest(bufReader)
 		if err != nil {

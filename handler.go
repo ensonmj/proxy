@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"net"
 	"net/url"
+	"time"
 
 	"github.com/ensonmj/proxy/cred"
 	"github.com/ensonmj/proxy/httpproxy"
@@ -15,7 +16,7 @@ import (
 )
 
 type Handler interface {
-	ServeConn(io.ReadWriter) error
+	ServeConn(net.Conn) error
 }
 
 func NewHttpHandler(
@@ -89,7 +90,9 @@ func NewAutoHandler(
 
 // ServeConn select handler automatically
 // all handlers must not write data before proxy protocol verified
-func (s *AutoServer) ServeConn(rw io.ReadWriter) error {
+func (s *AutoServer) ServeConn(conn net.Conn) error {
+	defer conn.Close()
+
 	httpR, httpW := io.Pipe()
 	sockR, sockW := io.Pipe()
 	go func() {
@@ -98,21 +101,21 @@ func (s *AutoServer) ServeConn(rw io.ReadWriter) error {
 
 		mw := io.MultiWriter(httpW, sockW)
 
-		io.Copy(mw, rw)
+		io.Copy(mw, conn)
 	}()
 
 	// HTTP/1.x
 	httpErrC := make(chan error)
 	go func() {
 		httpErrC <- s.hServer.ServeConn(
-			&wrapper{Reader: httpR, Writer: rw})
+			&wrapper{Reader: httpR, Writer: conn})
 		io.Copy(ioutil.Discard, httpR)
 	}()
 	// socks5
 	sockErrC := make(chan error)
 	go func() {
 		sockErrC <- s.sServer.ServeConn(
-			&wrapper{Reader: sockR, Writer: rw})
+			&wrapper{Reader: sockR, Writer: conn})
 		io.Copy(ioutil.Discard, sockR)
 	}()
 
@@ -149,13 +152,20 @@ func (c *wrapper) Read(b []byte) (n int, err error) {
 func (c *wrapper) Write(b []byte) (n int, err error) {
 	return c.Writer.Write(b)
 }
+func (c *wrapper) Close() error                       { return nil }
+func (c *wrapper) LocalAddr() net.Addr                { return c }
+func (c *wrapper) RemoteAddr() net.Addr               { return c }
+func (c *wrapper) SetDeadline(t time.Time) error      { return nil }
+func (c *wrapper) SetReadDeadline(t time.Time) error  { return nil }
+func (c *wrapper) SetWriteDeadline(t time.Time) error { return nil }
+func (c *wrapper) Network() string                    { return "warpper" }
+func (c *wrapper) String() string                     { return "warpper" }
 
 func NewRevSocksHandler(
-	user *url.Userinfo,
-	dialCtx func(context.Context, string, string) (net.Conn, error)) *socks5.Server {
+	dialCtx func(context.Context, string, string) (net.Conn, error)) *socks5.RevServer {
 	cfg := &socks5.Config{
 		Dial: dialCtx,
 	}
 	// reverse proxy not support authentication
-	return socks5.New(cfg)
+	return socks5.NewRev(cfg)
 }

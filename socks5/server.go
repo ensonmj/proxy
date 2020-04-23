@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/url"
-	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/ensonmj/proxy/cred"
@@ -17,6 +14,8 @@ import (
 )
 
 var (
+	gRevCtrlConn net.Conn
+
 	gRevConnLocker sync.Mutex
 	gRevConns      []net.Conn
 )
@@ -111,8 +110,10 @@ func New(conf *Config) *Server {
 }
 
 // ServeConn is used to serve a single connection.
-func (s *Server) ServeConn(rw io.ReadWriter) error {
-	bufReader := bufio.NewReader(rw)
+func (s *Server) ServeConn(conn net.Conn) error {
+	// we don't defer conn Close here
+
+	bufReader := bufio.NewReader(conn)
 
 	// Read the version byte
 	version := []byte{0}
@@ -126,7 +127,7 @@ func (s *Server) ServeConn(rw io.ReadWriter) error {
 	}
 
 	// Authenticate the connection
-	authContext, err := s.authenticate(rw, bufReader)
+	authContext, err := s.authenticate(conn, bufReader)
 	if err != nil {
 		return errors.Wrap(err, "[SOCKS5] failed to authenticate")
 	}
@@ -134,7 +135,7 @@ func (s *Server) ServeConn(rw io.ReadWriter) error {
 	request, err := ReadRequest(bufReader)
 	if err != nil {
 		if err == ErrBadAddrType {
-			if err := sendReply(rw, AddrUnsupported, nil); err != nil {
+			if err := sendReply(conn, AddrUnsupported, nil); err != nil {
 				return errors.Wrap(err, "[SOCKS5] failed to send reply")
 			}
 		}
@@ -143,7 +144,7 @@ func (s *Server) ServeConn(rw io.ReadWriter) error {
 	request.AuthContext = authContext
 
 	// Process the client request
-	if err := s.handleRequest(request, rw); err != nil {
+	if err := s.handleRequest(request, conn); err != nil {
 		return errors.Wrap(err, "[SOCKS5] failed to handle request")
 	}
 
@@ -200,7 +201,7 @@ func ReadRequest(bufConn io.Reader) (*Request, error) {
 }
 
 // handleRequest is used for request processing after authentication
-func (s *Server) handleRequest(req *Request, conn io.Writer) error {
+func (s *Server) handleRequest(req *Request, conn net.Conn) error {
 	ctx := context.Background()
 
 	// Apply any address rewrites
@@ -226,15 +227,20 @@ func (s *Server) handleRequest(req *Request, conn io.Writer) error {
 	// Switch on the command
 	switch req.Command {
 	case CmdConnect:
+		// don't close conn here
 		return s.handleConnect(ctx, conn, req)
 	case CmdBind:
+		defer conn.Close()
 		return s.handleBind(ctx, conn, req)
 	case CmdAssociate:
+		defer conn.Close()
 		return s.handleAssociate(ctx, conn, req)
-	case CmdListen:
-		return s.handleListen(ctx, conn, req)
-	case CmdRevConn:
-		return s.handleRevConn(ctx, conn, req)
+	case CmdRevCtrl:
+		// don't close conn here
+		return s.handleRevCtrl(ctx, conn, req)
+	case CmdRevData:
+		defer conn.Close()
+		return s.handleRevData(ctx, conn, req)
 	default:
 		if err := sendReply(conn, CmdUnsupported, nil); err != nil {
 			return fmt.Errorf("Failed to send reply: %v", err)
@@ -244,7 +250,22 @@ func (s *Server) handleRequest(req *Request, conn io.Writer) error {
 }
 
 // handleConnect is used to handle a connect command
-func (s *Server) handleConnect(ctx context.Context, conn io.Writer, req *Request) error {
+func (s *Server) handleConnect(ctx context.Context, conn net.Conn, req *Request) error {
+	if gRevCtrlConn != nil {
+		// request to build reverse connection
+		host := req.DestAddr.Hostname()
+		p := req.DestAddr.Port
+		if err := SendRequest(gRevCtrlConn, CmdConnect, host, uint16(p)); err != nil {
+			return errors.WithStack(err)
+		}
+
+		gRevConnLocker.Lock()
+		gRevConns = append(gRevConns, conn)
+		gRevConnLocker.Unlock()
+		return nil
+	}
+	defer conn.Close()
+
 	// Attempt to connect
 	dial := s.config.Dial
 	target, err := dial(ctx, "tcp", req.realDestAddr.Address())
@@ -286,203 +307,54 @@ func (s *Server) handleAssociate(ctx context.Context, conn io.Writer, req *Reque
 	return nil
 }
 
-// handleListen is used to handle a listen command in client end proxy
-func (s *Server) handleListen(ctx context.Context, conn io.Writer, req *Request) error {
-	ln, err := net.Listen("tcp", req.realDestAddr.Address())
-	if err != nil {
-		if err := sendReply(conn, Failure, nil); err != nil {
-			return fmt.Errorf("Failed to send reply: %v", err)
-		}
-		return errors.WithStack(err)
-	}
-	defer ln.Close()
-
-	// Send success
-	if err := sendReply(conn, Succeeded, req.DestAddr); err != nil {
-		return fmt.Errorf("Failed to send reply: %v", err)
-	}
-
-	for {
-		client, err := ln.Accept()
-		if err != nil {
-			return err
-		}
-
-		bufReader := bufio.NewReader(client)
-
-		// Read the version byte
-		version := []byte{0}
-		if _, err := bufReader.Read(version); err != nil {
-			return errors.Wrap(err, "[SOCKS5] failed to get version byte")
-		}
-
-		// Ensure we are compatible
-		if version[0] != SocksVer5 {
-			return errors.Errorf("[SOCKS5] unsupported SOCKS version[%v]", version)
-		}
-
-		// Authenticate the connection
-		authContext, err := s.authenticate(client, bufReader)
-		if err != nil {
-			return errors.Wrap(err, "[SOCKS5] failed to authenticate")
-		}
-
-		request, err := ReadRequest(bufReader)
-		if err != nil {
-			if err == ErrBadAddrType {
-				if err := sendReply(client, AddrUnsupported, nil); err != nil {
-					return errors.Wrap(err, "[SOCKS5] failed to send reply")
-				}
-			}
-			return errors.Wrap(err, "[SOCKS5] failed to read destination address")
-		}
-		request.AuthContext = authContext
-
-		// request to build reverse connection
-		host := request.DestAddr.Hostname()
-		p := request.DestAddr.Port
-		if err := SendRequest(conn, CmdConnect, host, uint16(p)); err != nil {
-			return errors.WithStack(err)
-		}
-
-		// TODO: make sure multi connections keep order?
+// handleRevCtrl is used to handle a listen command in client end proxy
+func (s *Server) handleRevCtrl(ctx context.Context, conn net.Conn, req *Request) error {
+	if gRevCtrlConn != nil {
+		// close last reverse proxy control connection
+		gRevCtrlConn.Close()
+		// we close client connect which haven't got reverse data connection
 		gRevConnLocker.Lock()
-		gRevConns = append(gRevConns, client)
+		for _, conn := range gRevConns {
+			sendReply(conn, HostUnreachable, nil)
+			conn.Close()
+		}
 		gRevConnLocker.Unlock()
 	}
+	gRevCtrlConn = conn
+	// Send success
+	if err := sendReply(gRevCtrlConn, Succeeded, nil); err != nil {
+		return fmt.Errorf("Failed to send reply: %v", err)
+	}
+	return nil
 }
 
-// handleListen is used to handle a listen command in client end proxy
-func (s *Server) handleRevConn(ctx context.Context, conn io.Writer, req *Request) error {
-	// TODO: make sure multi connections keep order?
+// handleRevData is used to handle a listen command in client end proxy
+func (s *Server) handleRevData(ctx context.Context, conn io.Writer, req *Request) error {
 	gRevConnLocker.Lock()
+	if len(gRevConns) == 0 {
+		// we got old data connection from old reverse proxy
+		gRevConnLocker.Unlock()
+		return nil
+	}
 	client := gRevConns[0]
 	gRevConns = gRevConns[1:]
 	gRevConnLocker.Unlock()
 
+	defer client.Close()
+
 	// Send success
-	local := client.LocalAddr().(*net.TCPAddr)
-	bind := AddrSpec{IP: local.IP, Port: local.Port}
-	if err := sendReply(conn, Succeeded, &bind); err != nil {
+	if err := sendReply(conn, Succeeded, nil); err != nil {
 		return fmt.Errorf("Failed to send reply: %v", err)
 	}
 
-	// local := client.LocalAddr().(*net.TCPAddr)
-	// bind := AddrSpec{IP: local.IP, Port: local.Port}
+	// Send success to client
+	local := client.LocalAddr().(*net.TCPAddr)
+	bind := AddrSpec{IP: local.IP, Port: local.Port}
 	if err := sendReply(client, Succeeded, &bind); err != nil {
 		return fmt.Errorf("Failed to send reply: %v", err)
 	}
 
 	return util.ConnIO(client, conn, req.bufConn)
-}
-
-// RevServeConn is used to dispatch reverse connection.
-func (s *Server) RevServeConn(url url.URL) error {
-	ctx := context.Background()
-
-	// connect to client end proxy
-	ctrlConn, err := s.config.Dial(ctx, "", "")
-	if err != nil {
-		return errors.WithStack(err)
-	}
-	// handshake with client end proxy without auth
-	Handshake(ctrlConn, "", "")
-	// send CmdListen to client end proxy
-	host := url.Hostname()
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	p, err := strconv.Atoi(url.Port())
-	if err != nil {
-		return errors.WithStack(err)
-	}
-	if err := SendRequest(ctrlConn, CmdListen, host, uint16(p)); err != nil {
-		return errors.WithStack(err)
-	}
-	// receive CmdListen reply
-	if _, err := ReadReply(ctrlConn); err != nil {
-		return errors.WithStack(err)
-	}
-
-	for {
-		// receive reverse proxy request
-		bufReader := bufio.NewReader(ctrlConn)
-		req, err := ReadRequest(bufReader)
-		if err != nil {
-			if err == ErrBadAddrType {
-				if err := sendReply(ctrlConn, AddrUnsupported, nil); err != nil {
-					return errors.Wrap(err, "[SOCKS5] failed to send reply")
-				}
-			}
-			return errors.Wrap(err, "[SOCKS5] failed to read destination address")
-		}
-
-		// Apply any address rewrites
-		req.realDestAddr = req.DestAddr
-		if s.config.Rewriter != nil {
-			ctx, req.realDestAddr = s.config.Rewriter.Rewrite(ctx, req)
-		}
-
-		// Resolve the address if we have a FQDN
-		dest := req.realDestAddr
-		if dest.FQDN != "" {
-			newCtx, addr, err := s.config.Resolver.Resolve(ctx, dest.FQDN)
-			if err != nil {
-				if err := sendReply(ctrlConn, HostUnreachable, nil); err != nil {
-					return fmt.Errorf("Failed to send reply: %v", err)
-				}
-				return fmt.Errorf("Failed to resolve destination '%v': %v", dest.FQDN, err)
-			}
-			ctx = newCtx
-			req.realDestAddr.IP = addr
-		}
-
-		// Switch on the command
-		switch req.Command {
-		case CmdConnect:
-			// dial target
-			target, err := net.Dial("tcp", req.realDestAddr.Address())
-			if err != nil {
-				resp := netErr2SockErr(err)
-				if err := sendReply(ctrlConn, resp, nil); err != nil {
-					return fmt.Errorf("Failed to send reply: %v", err)
-				}
-				return fmt.Errorf("Connect to %v failed: %v", req.DestAddr, err)
-			}
-			defer target.Close()
-
-			// Send success
-			local := target.LocalAddr().(*net.TCPAddr)
-			bind := AddrSpec{IP: local.IP, Port: local.Port}
-			if err := sendReply(ctrlConn, Succeeded, &bind); err != nil {
-				return fmt.Errorf("Failed to send reply: %v", err)
-			}
-
-			// dial client
-			dataConn, err := s.config.Dial(ctx, "", "")
-			if err != nil {
-				return errors.WithStack(err)
-			}
-			Handshake(dataConn, "", "")
-
-			if err := SendRequest(dataConn, CmdRevConn, req.DestAddr.Hostname(), uint16(req.DestAddr.Port)); err != nil {
-				return errors.WithStack(err)
-			}
-
-			// receive CmdListen reply
-			if _, err := ReadReply(dataConn); err != nil {
-				return errors.WithStack(err)
-			}
-
-			// Start proxying
-			go util.ConnIO(target, dataConn, dataConn)
-		default:
-			if err := sendReply(ctrlConn, CmdUnsupported, nil); err != nil {
-				return fmt.Errorf("Failed to send reply: %v", err)
-			}
-			return fmt.Errorf("Unsupported command: %v", req.Command)
-		}
-	}
 }
 
 // sendReply is used to send a reply message
@@ -529,15 +401,4 @@ func sendReply(w io.Writer, resp uint8, addr *AddrSpec) error {
 	// Send the message
 	_, err := w.Write(msg)
 	return err
-}
-
-func netErr2SockErr(err error) uint8 {
-	msg := err.Error()
-	resp := HostUnreachable
-	if strings.Contains(msg, "refused") {
-		resp = ConnRefused
-	} else if strings.Contains(msg, "network is unreachable") {
-		resp = NetUnreachable
-	}
-	return resp
 }

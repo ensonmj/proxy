@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"context"
 	"net"
 
 	"github.com/pkg/errors"
@@ -26,38 +25,53 @@ import (
 type Server struct {
 	*Node
 	handler Handler
-	DialCtx func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 func NewServer(localURL string, chainURL ...string) (*Server, error) {
-	n, err := ParseNode(localURL)
-	if err != nil {
-		return nil, err
-	}
 	chain, err := NewProxyChain(chainURL...)
 	if err != nil {
 		return nil, err
 	}
+
 	var h Handler
-	user := n.URL.User
-	switch n.URL.Scheme {
-	case "http":
-		h = NewHttpHandler(user, chain.DialContext)
-	case "socks5":
-		h = NewSocksHandler(user, chain.DialContext)
-	case "ghost":
-		fallthrough
-	default:
-		h = NewAutoHandler(user, chain.DialContext)
+	var n *Node
+
+	if localURL == "" {
+		// only support socks5 in reverse proxy
+		h = NewRevSocksHandler(chain.DialContext)
+	} else {
+		n, err = ParseNode(localURL)
+		if err != nil {
+			return nil, err
+		}
+		user := n.URL.User
+		switch n.URL.Scheme {
+		case "http":
+			h = NewHttpHandler(user, chain.DialContext)
+		case "socks5":
+			h = NewSocksHandler(user, chain.DialContext)
+		case "ghost":
+			fallthrough
+		default:
+			h = NewAutoHandler(user, chain.DialContext)
+		}
 	}
+
 	return &Server{
 		Node:    n,
 		handler: h,
-		DialCtx: chain.DialContext,
 	}, nil
 }
 
-func (s *Server) ListenAndServe() error {
+func (s *Server) Serve() error {
+	// reverse proxy
+	// ************************************************************************
+	// server --> server end proxy ... tunnel ... client end proxy --> client
+	// ************************************************************************
+	if s.Node == nil {
+		return s.handler.ServeConn(nil)
+	}
+
 	// now only support tcp
 	ln, err := net.Listen("tcp", s.Node.URL.Host)
 	if err != nil {
@@ -65,10 +79,6 @@ func (s *Server) ListenAndServe() error {
 	}
 	defer ln.Close()
 
-	return s.Serve(ln)
-}
-
-func (s *Server) Serve(ln net.Listener) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -87,7 +97,7 @@ func (s *Server) Serve(ln net.Listener) error {
 }
 
 func handleConn(conn net.Conn, node *Node, h Handler) {
-	defer conn.Close()
+	// defer conn.Close()
 
 	// hook conn for data process
 	c := WithInHooks(conn, node.hooks...)
@@ -96,22 +106,5 @@ func handleConn(conn net.Conn, node *Node, h Handler) {
 	err := h.ServeConn(c)
 	if err != nil {
 		log.WithError(err).Warn("proxy failed")
-	}
-}
-
-func (s *Server) RevServe() error {
-	cNode := s.Node
-	user := cNode.URL.User
-	switch cNode.URL.Scheme {
-	case "socks5":
-		err := NewRevSocksHandler(user, s.DialCtx).RevServeConn(cNode.URL)
-		if err != nil {
-			log.WithError(err).Warn("socks5 proxy failed")
-		}
-		return err
-	case "http", "ghost":
-		fallthrough
-	default:
-		return errors.New("reverse proxy not support protocol other than socks5")
 	}
 }

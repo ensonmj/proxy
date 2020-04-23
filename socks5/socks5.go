@@ -4,6 +4,7 @@
 package socks5
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/pkg/errors"
@@ -30,8 +31,8 @@ const (
 	CmdConnect uint8 = iota + 1
 	CmdBind
 	CmdAssociate // for udp
-	CmdListen    // expand for reverse proxy
-	CmdRevConn   // expand for reverse proxy
+	CmdRevCtrl   // expand for reverse proxy
+	CmdRevData   // expand for reverse proxy
 )
 
 // ATYP
@@ -81,3 +82,14 @@ var (
 		},
 	}
 )
+
+func netErr2SockErr(err error) uint8 {
+	msg := err.Error()
+	resp := HostUnreachable
+	if strings.Contains(msg, "refused") {
+		resp = ConnRefused
+	} else if strings.Contains(msg, "network is unreachable") {
+		resp = NetUnreachable
+	}
+	return resp
+}
