@@ -265,8 +265,6 @@ func (s *Server) handleConnect(ctx context.Context, conn net.Conn, req *Request)
 		return nil
 	}
 
-	defer conn.Close()
-
 	// Attempt to connect
 	dial := s.config.Dial
 	target, err := dial(ctx, "tcp", req.realDestAddr.Address())
@@ -277,7 +275,6 @@ func (s *Server) handleConnect(ctx context.Context, conn net.Conn, req *Request)
 		}
 		return fmt.Errorf("Connect to %v failed: %v", req.DestAddr, err)
 	}
-	defer target.Close()
 
 	// Send success
 	local := target.LocalAddr().(*net.TCPAddr)
@@ -335,8 +332,6 @@ func (s *Server) handleRevCtrl(ctx context.Context, conn net.Conn, req *Request)
 
 // handleRevData is used to handle a listen command in client end proxy
 func (s *Server) handleRevData(ctx context.Context, conn net.Conn, req *Request) error {
-	defer conn.Close()
-
 	gRevConnLocker.Lock()
 	if len(gRevConns) == 0 {
 		// we got old data connection from old reverse proxy
@@ -346,7 +341,6 @@ func (s *Server) handleRevData(ctx context.Context, conn net.Conn, req *Request)
 	client := gRevConns[0]
 	gRevConns = gRevConns[1:]
 	gRevConnLocker.Unlock()
-	defer client.Close()
 
 	// Send success
 	if err := sendReply(conn, Succeeded, nil); err != nil {

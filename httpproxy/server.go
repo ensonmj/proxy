@@ -56,8 +56,6 @@ func New(conf *Config) *Server {
 }
 
 func (h *Server) ServeConn(conn net.Conn) error {
-	defer conn.Close()
-
 	bufReader := bufio.NewReader(conn)
 	req, err := http.ReadRequest(bufReader)
 	if err != nil {
@@ -87,7 +85,6 @@ func (h *Server) ServeConn(conn net.Conn) error {
 			httpResp(conn, req, 500, err.Error())
 			return errors.WithStack(err)
 		}
-		defer targetConn.Close()
 
 		httpResp(conn, req, 200, "")
 

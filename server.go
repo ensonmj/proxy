@@ -97,8 +97,6 @@ func (s *Server) Serve() error {
 }
 
 func handleConn(conn net.Conn, node *Node, h Handler) {
-	// defer conn.Close()
-
 	// hook conn for data process
 	c := WithInHooks(conn, node.hooks...)
 

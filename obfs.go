@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -47,6 +48,9 @@ func (h *HttpSimpleObfsHook) Read(b []byte) (n int, err error) {
 		bufReader := bufio.NewReader(h.Conn)
 		resp, err := http.ReadResponse(bufReader, nil)
 		if err != nil {
+			if err == io.ErrUnexpectedEOF {
+				return 0, io.EOF
+			}
 			log.WithError(err).Error("read resp")
 			return 0, errors.WithStack(err)
 		}
