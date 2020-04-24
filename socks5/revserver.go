@@ -120,8 +120,8 @@ func (s *RevServer) ServeConn(_ net.Conn) error {
 			// Start proxying
 			go func() {
 				util.ConnIO(target, dataConn, dataConn)
-				dataConn.Close()
 				target.Close()
+				dataConn.Close()
 			}()
 		default:
 			if err := sendReply(ctrlConn, CmdUnsupported, nil); err != nil {

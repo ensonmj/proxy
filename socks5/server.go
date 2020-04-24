@@ -227,21 +227,17 @@ func (s *Server) handleRequest(req *Request, conn net.Conn) error {
 	// Switch on the command
 	switch req.Command {
 	case CmdConnect:
-		// don't close conn here
 		return s.handleConnect(ctx, conn, req)
 	case CmdBind:
-		defer conn.Close()
 		return s.handleBind(ctx, conn, req)
 	case CmdAssociate:
-		defer conn.Close()
 		return s.handleAssociate(ctx, conn, req)
 	case CmdRevCtrl:
-		// don't close conn here
 		return s.handleRevCtrl(ctx, conn, req)
 	case CmdRevData:
-		defer conn.Close()
 		return s.handleRevData(ctx, conn, req)
 	default:
+		defer conn.Close()
 		if err := sendReply(conn, CmdUnsupported, nil); err != nil {
 			return fmt.Errorf("Failed to send reply: %v", err)
 		}
@@ -255,15 +251,20 @@ func (s *Server) handleConnect(ctx context.Context, conn net.Conn, req *Request)
 		// request to build reverse connection
 		host := req.DestAddr.Hostname()
 		p := req.DestAddr.Port
+
+		// make sure save target connection before recieve CmdRevData
+		gRevConnLocker.Lock()
 		if err := SendRequest(gRevCtrlConn, CmdConnect, host, uint16(p)); err != nil {
 			return errors.WithStack(err)
 		}
-
-		gRevConnLocker.Lock()
+		if _, err := ReadReply(gRevCtrlConn); err != nil {
+			return errors.WithStack(err)
+		}
 		gRevConns = append(gRevConns, conn)
 		gRevConnLocker.Unlock()
 		return nil
 	}
+
 	defer conn.Close()
 
 	// Attempt to connect
@@ -290,7 +291,8 @@ func (s *Server) handleConnect(ctx context.Context, conn net.Conn, req *Request)
 }
 
 // handleBind is used to handle a bind command
-func (s *Server) handleBind(ctx context.Context, conn io.Writer, req *Request) error {
+func (s *Server) handleBind(ctx context.Context, conn net.Conn, req *Request) error {
+	defer conn.Close()
 	// TODO: Support bind
 	if err := sendReply(conn, CmdUnsupported, nil); err != nil {
 		return fmt.Errorf("Failed to send reply: %v", err)
@@ -299,7 +301,8 @@ func (s *Server) handleBind(ctx context.Context, conn io.Writer, req *Request) e
 }
 
 // handleAssociate is used to handle a associate command
-func (s *Server) handleAssociate(ctx context.Context, conn io.Writer, req *Request) error {
+func (s *Server) handleAssociate(ctx context.Context, conn net.Conn, req *Request) error {
+	defer conn.Close()
 	// TODO: Support associate
 	if err := sendReply(conn, CmdUnsupported, nil); err != nil {
 		return fmt.Errorf("Failed to send reply: %v", err)
@@ -321,6 +324,8 @@ func (s *Server) handleRevCtrl(ctx context.Context, conn net.Conn, req *Request)
 		gRevConnLocker.Unlock()
 	}
 	gRevCtrlConn = conn
+
+	// build reverse control connection success
 	// Send success
 	if err := sendReply(gRevCtrlConn, Succeeded, nil); err != nil {
 		return fmt.Errorf("Failed to send reply: %v", err)
@@ -329,7 +334,9 @@ func (s *Server) handleRevCtrl(ctx context.Context, conn net.Conn, req *Request)
 }
 
 // handleRevData is used to handle a listen command in client end proxy
-func (s *Server) handleRevData(ctx context.Context, conn io.Writer, req *Request) error {
+func (s *Server) handleRevData(ctx context.Context, conn net.Conn, req *Request) error {
+	defer conn.Close()
+
 	gRevConnLocker.Lock()
 	if len(gRevConns) == 0 {
 		// we got old data connection from old reverse proxy
@@ -339,7 +346,6 @@ func (s *Server) handleRevData(ctx context.Context, conn io.Writer, req *Request
 	client := gRevConns[0]
 	gRevConns = gRevConns[1:]
 	gRevConnLocker.Unlock()
-
 	defer client.Close()
 
 	// Send success
